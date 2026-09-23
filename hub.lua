@@ -2396,6 +2396,14 @@ if HUB_CURRENT ~= 'roguecopy' then
                             goal, flat, kaN, kaHold, kaSnap = g2, f2, tonumber(n2) or 0, h2, s2 == true
                         end
                     end
+                    -- Skill aura "step in front": for the cast window stand in front of the
+                    -- target at its height, facing it (thin breathing boxes miss from the head).
+                    local kaFrontOn = S.kaFront and os.clock() < (S.kaAimUntil or 0)
+                    if kaFrontOn then
+                        goal = mroot.Position + mobFlat.Unit * S.kaFront
+                        flat = (mroot.Position - goal) * Vector3.new(1, 0, 1)
+                        if flat.Magnitude < 0.1 then flat = -mobFlat end
+                    end
                     -- skill dodge: hop out of range for the skill's active time, then snap back
                     followTrack()
                     local nowD = os.clock()
@@ -2425,6 +2433,14 @@ if HUB_CURRENT ~= 'roguecopy' then
                         return
                     end
                     local delta = goal - root.Position
+                    if kaFrontOn and delta.Magnitude <= 25 then
+                        root.CFrame = CFrame.lookAt(goal, goal + flat.Unit) -- quick hop in front / back to the perch
+                        delta = Vector3.zero
+                    elseif not kaFrontOn and S.kaFront and delta.Magnitude <= 25 then
+                        S.kaFront = nil -- cast done: snap straight back onto the head
+                        root.CFrame = CFrame.lookAt(goal, goal + flat.Unit)
+                        delta = Vector3.zero
+                    end
                     if kaSnap and S.farmLocked and delta.Magnitude > 6 and delta.Magnitude <= 20 then
                         root.CFrame = CFrame.lookAt(goal, goal + flat.Unit) -- Kill Aura just changed the spot: short hop, keep swinging
                         delta = Vector3.zero
@@ -4276,15 +4292,19 @@ if HUB_CURRENT ~= 'roguecopy' then
                 box:AddDropdown('SLKASSkills', { Values = {}, Default = {}, Multi = true, AllowNull = true, Text = 'Skills it may cast',
                     Tooltip = 'Your current HUD loadout (Blocking and skills whose hold / tap branches are not modelled are never listed). New skills start ticked when they have a real area box at your root (10+ studs, not a grab / counter / dash / projectile) and lock you for 3.5s or less.' })
                 box:AddButton({ Text = 'Refresh loadout', Func = function() if refreshLoadout then task.spawn(refreshLoadout, true) end end })
-                box:AddSlider('SLKASMin', { Text = 'Min targets', Default = 2, Min = 1, Max = 8, Rounding = 0,
+                box:AddSlider('SLKASMin', { Text = 'Min targets', Default = 1, Min = 1, Max = 8, Rounding = 0,
                     Tooltip = 'Cast only when the box of the skill would hit at least this many mobs. A boss counts as 3.' })
-                box:AddToggle('SLKASAnyTime', { Text = 'Cast outside finisher gap', Default = false,
+                box:AddToggle('SLKASAnyTime', { Text = 'Cast outside finisher gap', Default = true,
                     Tooltip = 'Off: while the farm holds M1, cast only in the free gap after your 5th hit (the next M1 waits 1.65s; skills are client-locked for 0.5s after any M1). On: cast whenever ready - M1 is paused ~0.6s so the 0.5s lock clears.' })
                 box:AddSlider('SLKASGapEnd', { Text = 'Finisher gap end margin', Default = 0.35, Min = 0, Max = 1, Rounding = 2, Suffix = ' s',
                     Tooltip = 'Stop starting casts this long before the next M1 is due (gap = 0.5s .. final 1.65s after the finisher).' })
                 box:AddToggle('SLKASHold', { Text = 'Hold skills to max', Default = false,
                     Tooltip = 'Hold the key for the Max_Hold of the skill (minus 0.25s) instead of tapping - for hold-loop skills. Capped by Max hold time. Skills with a verified hold / tap branch always use their own hold time.' })
                 box:AddSlider('SLKASHoldCap', { Text = 'Max hold time', Default = 5, Min = 0.3, Max = 6, Rounding = 1, Suffix = ' s' })
+                box:AddToggle('SLKASFront', { Text = 'Step in front to cast (farm)', Default = true,
+                    Tooltip = 'While farming: for each cast, snap down in front of the target at its height, facing it, cast, then go straight back to the head perch. Breathing skill boxes are thin and miss from on top of the mob. The mob can hit you during the cast (Auto Parry / skill dodge still run).' })
+                box:AddSlider('SLKASFrontDist', { Text = 'Front distance', Default = 4, Min = 1, Max = 12, Rounding = 1, Suffix = ' studs',
+                    Tooltip = 'How far in front of the target to stand while casting.' })
                 box:AddSlider('SLKASDrop', { Text = 'Max cast drop', Default = 0, Min = 0, Max = 5, Rounding = 1, Suffix = ' studs',
                     Tooltip = 'Farm only, cancel-bypass skills only (a stun cannot cancel them): many skill boxes start 3 studs under your root and miss from the head of the mob. Sinks you by the smallest amount (0.5 steps) that reaches Min targets, and only for ~0.35s around each hit - the rest of the cast you stay on the perch. 0 = never.' })
                 box:AddSlider('SLKASFallback', { Text = 'Fallback radius', Default = 10, Min = 4, Max = 30, Rounding = 0, Suffix = ' studs',
@@ -4739,6 +4759,16 @@ if HUB_CURRENT ~= 'roguecopy' then
                     return best, why
                 end
 
+                -- Cast spot in front of the farm target, at its root height, facing it.
+                local function frontFrame()
+                    local t = S.farmGetTarget and S.farmGetTarget()
+                    local mr = t and t:FindFirstChild('HumanoidRootPart')
+                    if not mr then return nil end
+                    local lv = mr.CFrame.LookVector * Vector3.new(1, 0, 1)
+                    if lv.Magnitude < 0.1 then lv = Vector3.new(0, 0, -1) end
+                    local p = mr.Position + lv.Unit * Options.SLKASFrontDist.Value
+                    return { Position = p, CFrame = CFrame.lookAt(p, Vector3.new(mr.Position.X, p.Y, mr.Position.Z)), aimAt = mr.Position }
+                end
                 local function cpm()
                     local now, keep = os.clock(), {}
                     for _, t in ipairs(castLog) do if now - t <= 60 then keep[#keep + 1] = t end end
@@ -4793,6 +4823,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                     -- 1) face / aim first; the settle wait below lets it replicate
                     S.kaSkill, S.kaAim, S.kaDropWins = s.name, e.aim, nil
                     S.kaDrop = (farm and info.cancelBypass) and e.drop or 0
+                    S.kaFront = (farm and e.front) and Options.SLKASFrontDist.Value or nil
                     S.kaAimUntil = t0 + 1 + span
                     faceHold = (not farm) and Toggles.SLKASFace.Value
                     -- 2) the HUD slot must hold THIS skill, and the HUD's cached list must be
@@ -4949,7 +4980,14 @@ if HUB_CURRENT ~= 'roguecopy' then
                                     local centroid, w = packAim(mobs, root.Position, reach)
                                     if centroid and w >= minT then
                                         local dropMax = (farmOn and S.farmLocked and info.cancelBypass) and Options.SLKASDrop.Value or 0
-                                        local e, bad = evalSkill(info, root, centroid, dropMax, canTurn)
+                                        local front = farmOn and S.farmLocked and Toggles.SLKASFront.Value and frontFrame()
+                                        local e, bad
+                                        if front then
+                                            e, bad = evalSkill(info, front, front.aimAt, 0, false)
+                                            if e then e.front = true; e.drop = 0 end
+                                        else
+                                            e, bad = evalSkill(info, root, centroid, dropMax, canTurn)
+                                        end
                                         if e and e.score >= minT then
                                             -- lock time costs M1 hits (~1.86/s) the cast has to make up for
                                             local rank = e.score - info.lock * 1.86 / math.max(e.score, 1)
@@ -5826,6 +5864,12 @@ if HUB_CURRENT ~= 'roguecopy' then
                     Tooltip = 'Moves nothing while another player is this close (they would see it). 0 = never pause. Mobs another player is fighting (their NpcsFollowing) are never moved.' })
                 box:AddToggle('SLMagBosses', { Text = 'Also move bosses', Default = false,
                     Tooltip = 'A boss glued under you is the most visible thing this can do. Off = bosses are never moved.' })
+                box:AddToggle('SLMagVoid', { Text = 'Void owned mobs (experimental)', Default = false,
+                    Tooltip = 'Once YOUR damage on an owned mob reaches the threshold below (its DMG ledger vs MaxHealth), switch off the capture pull on your client and drop it below the map. Works mid-capture (Vortex / Gale / Dust Storm / Obi Charge give you ownership). UNTESTED: whether a void death pays EXP / quest credit is server-side - test on a normal mob with the EXP meter first. Probe only = counts "would void" and moves nothing.' })
+                box:AddSlider('SLMagVoidPct', { Text = 'Void after my damage', Default = 10, Min = 0, Max = 100, Rounding = 0, Suffix = ' %',
+                    Tooltip = 'Only void a mob once your share of its damage (DMG ledger / MaxHealth) is at least this. 10% is the credit threshold you reported.' })
+                box:AddToggle('SLMagVoidBoss', { Text = 'Void bosses too', Default = false,
+                    Tooltip = 'Also void owned bosses. Everyone on the boss sees it fall through the floor.' })
                 box:AddLabel('Waits while a mob is in the vortex, carried, knocked\nback or ragdolled; holds counter-armed / perfect-\nblocking mobs just outside your box; pauses while\nthe farm travels or dodges. Parked mobs feed the\nfarm\'s skill dodge. Never parks a mob on water.', true)
                 local isOwner = isnetworkowner or is_network_owner
                 if not isOwner then box:AddLabel('Executor lacks isnetworkowner - magnet disabled.', true) end
@@ -5919,6 +5963,7 @@ if HUB_CURRENT ~= 'roguecopy' then
 
                 local cands, seen, slotOf, slotUsed, holding, others = {}, {}, {}, {}, {}, {}
                 local origin = setmetatable({}, { __mode = 'k' }) -- where we first moved each mob from (leash)
+                local voiding = setmetatable({}, { __mode = 'k' }) -- [model] = root we are dropping below the map
                 -- Camps reset mobs past Spawning.DespawnDistance (150 default, 250+ on the
                 -- live camps) from their Center: 100 stays inside both.
                 local LEASH = 100
@@ -5969,7 +6014,8 @@ if HUB_CURRENT ~= 'roguecopy' then
                             if owns(m.root) then
                                 n = n + 1
                                 if (m.root.Position - rootPos).Magnitude <= rad and not others[m.model]
-                                    and not (m.boss and not Toggles.SLMagBosses.Value) and not (m.civ and skipCiv) then
+                                    and not (m.boss and not (Toggles.SLMagBosses.Value or (Toggles.SLMagVoid.Value and Toggles.SLMagVoidBoss.Value)))
+                                    and not (m.civ and skipCiv) then
                                     cands[#cands + 1] = m
                                 end
                             else
@@ -6160,6 +6206,33 @@ if HUB_CURRENT ~= 'roguecopy' then
                     seen[model] = 'slot'
                     return 'slot'
                 end
+                -- ---- void: drop an owned mob below the map once our damage share is enough ----
+                -- Our share = <mob>.DMG.<our name>.Value / MaxHealth (the ledger the boss bar shows).
+                local function myShare(m)
+                    local v = tonumber(S.val(m.model, 'DMG', LP.Name)) or 0
+                    return v / math.max(m.hum.MaxHealth, 1)
+                end
+                local function voidReady(m)
+                    if not Toggles.SLMagVoid.Value then return false end
+                    if m.boss and not Toggles.SLMagVoidBoss.Value then return false end
+                    return myShare(m) >= Options.SLMagVoidPct.Value / 100
+                end
+                -- We own the root, so our client simulates it: switch off the capture's pull
+                -- (AlignPosition "P" under the "ALP" attachment) and any mover LOCALLY, then
+                -- put the root under FallenPartsDestroyHeight. Repeated every frame we own it.
+                local function voidMob(mr)
+                    for _, d in ipairs(mr:GetDescendants()) do
+                        if d:IsA('Constraint') then pcall(function() d.Enabled = false end)
+                        elseif d:IsA('BodyVelocity') or d:IsA('BodyPosition') then pcall(function() d.MaxForce = Vector3.zero end)
+                        elseif d:IsA('BodyGyro') then pcall(function() d.MaxTorque = Vector3.zero end) end
+                    end
+                    for _, c in ipairs(mr:GetChildren()) do
+                        if c:IsA('LinearVelocity') or c:IsA('VectorForce') or c:IsA('AlignPosition') then pcall(function() c.Enabled = false end) end
+                    end
+                    local y = (workspace.FallenPartsDestroyHeight or -500) - 100
+                    mr.CFrame = CFrame.new(mr.Position.X, y, mr.Position.Z)
+                    mr.AssemblyLinearVelocity = Vector3.new(0, -1000, 0)
+                end
                 local function step(dt)
                     if S.dead then return end
                     local root, hum = S.root(), S.hum()
@@ -6176,7 +6249,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                     F.dry, F.dt, F.rootPos = Toggles.SLMagProbe.Value, dt, root.Position
                     local rootPos = F.rootPos
                     table.clear(seen)
-                    local parked, held, waiting, unsafe = 0, 0, 0, 0
+                    local parked, held, waiting, unsafe, voidN = 0, 0, 0, 0, 0
                     local rad, maxN = Options.SLMagRadius.Value + 4, Options.SLMagMax.Value
                     -- the farm's live target (Heartbeat runs after its RenderStepped): the farm
                     -- sits on it, so moving it too = the two chase each other. No getter =
@@ -6188,6 +6261,9 @@ if HUB_CURRENT ~= 'roguecopy' then
                         if model.Parent and mr.Parent and m.hum.Health > 0 and (mr.Position - rootPos).Magnitude <= rad then
                             if not owns(mr) then
                                 origin[model] = nil -- ownership lost: never touched again until re-grabbed
+                            elseif not nearPlayer and voidReady(m) then
+                                voidN = voidN + 1
+                                if not F.dry then voiding[model] = mr; voidMob(mr) end
                             elseif why then
                                 if slotOf[model] then seen[model] = 'slot' end
                                 if holding[model] then seen[model] = 'hold' end
@@ -6196,7 +6272,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                                 local flatD = Vector3.new(mpos.X - rootPos.X, 0, mpos.Z - rootPos.Z).Magnitude
                                 local isTarget = (tgt ~= nil and model == tgt)
                                     or (S.farmGetTarget == nil and S.farmLocked and flatD < 1.2 and mpos.Y < rootPos.Y)
-                                if not isTarget then
+                                if not isTarget and not (m.boss and not Toggles.SLMagBosses.Value) then
                                     if not geo then -- geometry once per frame, only when something is ours
                                         geo = frameGeometry(root)
                                         if not geo then break end
@@ -6216,6 +6292,15 @@ if HUB_CURRENT ~= 'roguecopy' then
                     for model in pairs(holding) do
                         if seen[model] ~= 'hold' then holding[model] = nil end
                     end
+                    -- keep pushing mobs we started voiding (they leave the radius as they fall)
+                    for model, mr in pairs(voiding) do
+                        local h = model:FindFirstChildOfClass('Humanoid')
+                        if model.Parent and mr.Parent and h and h.Health > 0 and owns(mr) and not F.dry then
+                            voidMob(mr)
+                        else
+                            voiding[model] = nil
+                        end
+                    end
                     if now - lastLbl > 0.3 then
                         lastLbl = now
                         local t = ('owned mobs: %d'):format(ownedAll)
@@ -6223,6 +6308,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                         if held > 0 then t = t .. (F.dry and '  |  would hold out: %d' or '  |  held out: %d'):format(held) end
                         if waiting > 0 then t = t .. ('  |  waiting: %d'):format(waiting) end
                         if unsafe > 0 then t = t .. ('  |  no safe spot: %d'):format(unsafe) end
+                        if voidN > 0 then t = t .. (F.dry and '  |  would void: %d' or '  |  voiding: %d'):format(voidN) end
                         if why and ownedAll > 0 then t = t .. ('  (paused: %s)'):format(why) end
                         if F.dry then t = t .. '  [probe: nothing moved]' end
                         if t ~= lastText then lastText = t; S.setText(status, t) end
@@ -6232,7 +6318,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                 local function stop()
                     if conn then conn:Disconnect(); conn = nil end
                     table.clear(cands); table.clear(seen); table.clear(slotOf); table.clear(slotUsed)
-                    table.clear(holding); table.clear(others); table.clear(origin); table.clear(F.carried)
+                    table.clear(holding); table.clear(others); table.clear(origin); table.clear(F.carried); table.clear(voiding)
                     ownedAll, nearPlayer, lastText, lastErr = 0, nil, '', nil
                     S.setText(status, 'owned mobs: -')
                 end

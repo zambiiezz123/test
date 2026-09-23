@@ -1376,10 +1376,13 @@ if HUB_CURRENT ~= 'roguecopy' then
                 if not P then return nil end
                 local weapon = info and tostring(info.skill or ''):match('^(.-)_Combat_Anims$')
                 if weapon and P[weapon] then return P[weapon], weapon end
-                local CIP = S.req('CAM.Global.Character_info_provider')
-                if CIP and CIP.Get_equipped_tool then
-                    local ok, t = pcall(CIP.Get_equipped_tool, model)
-                    if ok and t and t.Name and P[t.Name] then return P[t.Name], t.Name end
+                -- No anim-folder hint: the attacker's own normalised preset (S.m1Preset:
+                -- NpcMimicFolder.Equipped_Tool for mobs - CIP.Get_equipped_tool returns nil for
+                -- every NPC - so "Cutlass" -> Regular Katana and "Blood Sickles" -> Sickles
+                -- instead of silently falling back to Combat).
+                if S.m1Preset then
+                    local p, n = S.m1Preset(model)
+                    if p then return p, n end
                 end
                 return P.Combat, 'Combat'
             end
@@ -1425,6 +1428,119 @@ if HUB_CURRENT ~= 'roguecopy' then
                 local zo = presetIdx(preset.ZOffsets, idx); if zo then cf = cf * CFrame.new(0, 0, -zo) end
                 return cf, size
             end
+            -- ---- M1 preset + vertical box maths (farm head height, Auto Parry reach, viewer) ----
+            -- Preset name -> preset, normalised like the game's own M1 punch() (CU/Combat.lua:91-138):
+            -- Presets[v]; else an item with a CombatPreset / HasCombat / Breathing swings
+            -- Presets[CombatPreset or 'Regular Katana']; anything else (plain item, unknown
+            -- name, no value) = bare Combat.
+            function S.m1PresetNamed(v)
+                local CPm = S.req('CAM.Global.Combat_presets')
+                local P = CPm and type(CPm.Presets) == 'table' and CPm.Presets
+                if not P then return nil, nil end
+                if type(v) ~= 'string' or v == '' then return P.Combat, 'Combat' end
+                if P[v] then return P[v], v end
+                local Items = S.req('CAM.Global.Collectibles.Items')
+                local ok, it = pcall(function() return Items and Items[v] end)
+                if ok and type(it) == 'table' and (it.CombatPreset ~= nil or it.HasCombat or it.Breathing ~= nil) then
+                    local n = (type(it.CombatPreset) == 'string' and it.CombatPreset) or 'Regular Katana'
+                    if P[n] then return P[n], n end
+                end
+                return P.Combat, 'Combat'
+            end
+            -- The preset an attacker's server M1 box is built from. Mobs: the model's
+            -- AiPrerequistes.NpcMimicFolder.Equipped_Tool ("Bear", "Cutlass", "Blood Sickles",
+            -- "Obi Manipulation"...), read straight off the model: CIP.Get_equipped_tool always
+            -- returns nil for NPCs (it hands AiMimic:Get a nil model; Character_info_provider.lua
+            -- 22-27, AiMimic.lua 9-11). Every AiPrerequistes child is scanned defensively.
+            -- Us: get_equipped_Combat (CU/Combat.lua:9-42) - the Toolbar item when it has its own
+            -- CombatPreset, else the first Skills_Provider.CurPower style that has an
+            -- Assets.Animations["<style>_Combat_Anims"] folder, else the item / bare Combat.
+            -- Other players: their equipped item (their CurPower is not replicated to us).
+            function S.m1Preset(who)
+                if typeof(who) ~= 'Instance' then return S.m1PresetNamed(nil) end
+                local plr = (who:IsA('Player') and who) or Players:GetPlayerFromCharacter(who)
+                if not plr then
+                    for _, ch in ipairs(who:GetChildren()) do
+                        if ch.Name == 'AiPrerequistes' then
+                            local f = ch:FindFirstChild('NpcMimicFolder')
+                            local e = f and f:FindFirstChild('Equipped_Tool')
+                            if e and e:IsA('ValueBase') and e.Value ~= nil and tostring(e.Value) ~= '' then
+                                return S.m1PresetNamed(tostring(e.Value))
+                            end
+                        end
+                    end
+                    return S.m1PresetNamed(nil)
+                end
+                local nm
+                local CIP = S.req('CAM.Global.Character_info_provider')
+                if CIP and CIP.Get_equipped_tool then
+                    local ok, n = pcall(function()
+                        local t = CIP.Get_equipped_tool(plr)
+                        return t and t.Name
+                    end)
+                    if ok and type(n) == 'string' and n ~= '' then nm = n end
+                end
+                if plr == LP then
+                    local Items = S.req('CAM.Global.Collectibles.Items')
+                    local ok, it = pcall(function() return nm and Items and Items[nm] end)
+                    local cp = ok and type(it) == 'table' and it.CombatPreset or nil
+                    if cp == nil or cp == 'Combat' then
+                        -- the game's own test (Combat.lua:24-29): a style swings only if its anim
+                        -- folder exists. Presets alone can't tell - Combat_presets.lua:163-167 adds
+                        -- EVERY FightingStyles key to Presets (aliased to Combat).
+                        local cur = S.find('CAM.Client.Controllers.Skills_Provider.CurPower')
+                        local anims = S.find('Assets.Animations')
+                        if cur and cur:IsA('StringValue') and anims then
+                            for p in cur.Value:gmatch('[^,]+') do
+                                if anims:FindFirstChild(p .. '_Combat_Anims') then return S.m1PresetNamed(p) end
+                            end
+                        end
+                    end
+                end
+                return S.m1PresetNamed(nm)
+            end
+            -- Vertical span of an M1 box over EVERY combo hit 1..Max (Get_Players_For_Combat:
+            -- centre root -1 (+YOffsets[i]), height 6.25 + Widths[i]; Combat_presets.lua:403-427),
+            -- relative to the attacker's root. which = 'top': the highest top (a mob's worst reach
+            -- UP); 'bottom': the highest bottom (OUR shallowest reach down, so every hit lands).
+            function S.m1BoxSpan(preset, which)
+                local best
+                for i = 1, math.max(1, (preset and tonumber(preset.Max)) or 7) do
+                    local c = -1 + ((preset and presetIdx(preset.YOffsets, i)) or 0)
+                    local h = (6.25 + ((preset and presetIdx(preset.Widths, i)) or 0)) / 2
+                    local v = (which == 'bottom') and (c - h) or (c + h)
+                    if not best or v > best then best = v end
+                end
+                return best or ((which == 'bottom') and -4.125 or 2.125)
+            end
+            function S.mobBoxTop(model) return S.m1BoxSpan((S.m1Preset(model)), 'top') end
+            -- Our root centre -> feet (R15: HipHeight + half the root; R6: legs hang 2 studs
+            -- under the torso). ONE number for the farm's head height AND Auto Parry's reach test.
+            function S.m1Legs()
+                local hum, root = S.hum(), S.root()
+                local half = root and root.Size.Y / 2 or 1
+                if hum and hum.RigType == Enum.HumanoidRigType.R6 then return half + 2 end
+                return (hum and hum.HipHeight or 2) + half
+            end
+            -- Highest point of a model's DIRECT-CHILD BaseParts above its root. That is all the
+            -- server's box query sees (Utility.GetModelInRegion keeps a part only when its Parent
+            -- is the Humanoid model: hats, weapon models, hair folders never count), unlike
+            -- GetBoundingBox. CanQuery=false parts are invisible to GetPartBoundsInBox as well.
+            function S.bodyTop(model, root)
+                root = root or model:FindFirstChild('HumanoidRootPart')
+                if not root then return nil end
+                local top
+                for _, p in ipairs(model:GetChildren()) do
+                    if p:IsA('BasePart') and p.CanQuery then
+                        local cf, sz = p.CFrame, p.Size
+                        local t = cf.Position.Y + (math.abs(cf.RightVector.Y) * sz.X + math.abs(cf.UpVector.Y) * sz.Y
+                            + math.abs(cf.LookVector.Y) * sz.Z) / 2
+                        if not top or t > top then top = t end
+                    end
+                end
+                return top and (top - root.Position.Y) or nil
+            end
+            S.FARM_CLEAR = 0.15 -- the farm parks our feet this far above a mob's worst box top (+ Height tweak)
             function S.pingSec()
                 local ok, ms = pcall(function() return game:GetService('Stats').Network.ServerStatsItem['Data Ping']:GetValue() end)
                 if not (ok and ms) then ok, ms = pcall(function() return LP:GetNetworkPing() * 2000 end) end
@@ -1500,9 +1616,15 @@ if HUB_CURRENT ~= 'roguecopy' then
                 task.spawn(function() pcall(function() LP:RequestStreamAroundAsync(pos, 5) end) end)
                 task.spawn(function()
                     local t0 = os.clock()
+                    local yielded = false
                     while glideGen == gen and os.clock() - t0 < 240 do
                         local dt = RunService.Heartbeat:Wait()
                         if glideGen ~= gen then break end
+                        -- The Mob farm pins the root on RenderStepped once it has a target; a glide
+                        -- still running on Heartbeat (quest camp trip, farm return, a Travel click)
+                        -- wrote LAST every frame and dragged us off the mob's head. The farm wins:
+                        -- this glide ends the moment it has a target (a paused farm has none).
+                        if S.farmHasTarget and not S.farmPaused then yielded = true; break end
                         local r = S.root()
                         if r then
                             local delta = pos - r.Position
@@ -1516,7 +1638,11 @@ if HUB_CURRENT ~= 'roguecopy' then
                     end
                     if glideGen == gen then
                         S.noclip('glide', false)
-                        if label then Library:Notify('Arrived: ' .. label, 2) end
+                        if label then
+                            S.ui() -- worker thread: re-raise identity before touching the hub GUI
+                            if yielded then pcall(Library.Notify, Library, 'Glide to ' .. label .. ' stopped - Mob farm has a target', 3)
+                            else pcall(Library.Notify, Library, 'Arrived: ' .. label, 2) end
+                        end
                     end
                 end)
             end
@@ -1550,6 +1676,186 @@ if HUB_CURRENT ~= 'roguecopy' then
                 end
             end
             local IH = S.req('CAM.Client.Components.Client.InputHandler') -- the game's input API
+            -- ---- Kill-aura target counting (shared by every kill-aura feature) --
+            -- count, players, mobs, bosses, civs, perfect = S.kaTargetsInBox(cf, size, kind)
+            -- Same query every server hitbox runs: Utility.GetModelInRegion
+            -- (RS/CAM/Global/Utility.lua:1216) = workspace:GetPartBoundsInBox over
+            -- workspace.Humanoids (RaycastHelper.lua:34-44: Include, MaxParts 350);
+            -- a part counts for its PARENT Model, which must have a PrimaryPart.
+            -- Player characters live in workspace.Humanoids too and check_victim only
+            -- spares them in a Safezone / Lair / minigame / party (Checker.lua:856-891),
+            -- so every skill box CAN hit players - callers must keep them out.
+            --   count   = #mobs: live IsMob models touched that the hit is not wasted
+            --             on (civilians left out; BossInfo trainees DO count)
+            --   players = OTHER players touched: root inside the box grown by a body's
+            --             half size (works whether or not characters live under
+            --             workspace.Humanoids) + other players' clones (Clone_Owner)
+            --   mobs    = array of the counted mob Models; bosses = how many of them
+            --             sit in a slot with BossInfo (weight them yourself)
+            --   civs    = civilians touched (never in count)
+            --   perfect = touched mobs holding Blocking.Perfect: a Perfect hit makes the
+            --             skill's hitDetected return true (e.g. Flame TigerServer.lua:84-86)
+            --             and Utility.ProcessHitboxTargets stops its target loop on a true
+            --             return (Utility.lua:832-884), so the rest of the box is wasted
+            --   kind    = nil (alive only) | 'm1' | 'skill' -> S.kaHittable filter
+            -- S.kaHittable(model, kind) -> false when Checker.check_victim would waste
+            --   the hit (Checker.lua:816-1123; a mob's values folder = the mob Model):
+            --   iframe (StatsFetch.GetIFrame / iframe child / SHCS iframe skill),
+            --   NpcCounter attr (1 = counters M1, 3 = counters skills, 2 = both) and
+            --   StatsFetch.GetCounter (armed Counter StringValue or live skill counter,
+            --   same 1/2/3 types) - two SEPARATE checks on the server (:938-966 then
+            --   :974-1003), so either one can waste the hit; Dodge IntValue (M1 always;
+            --   skills unless Mode == 'Combat', :1010-1019); Blocking.Perfect.
+            --   Results are cached per model for 0.1s (callers query many boxes a tick).
+            -- S.kaPlayersInBox(cf, size) -> other players whose root is inside (no query).
+            -- S.kaPlayersNear(pos, radius) -> n, nearest: other players' roots + their
+            --   Clone_Owner models among workspace.Humanoids' children within radius.
+            ;(function()
+                local params = OverlapParams.new()
+                params.FilterType = Enum.RaycastFilterType.Include
+                params.MaxParts = 350 -- the server's own cap (RaycastHelper.Humanoids)
+                local SF
+                local function sf()
+                    SF = SF or S.req('CAM.Global.Subsets.Gameplay.StatsFetch')
+                    return SF
+                end
+                local function playersIn(cf, size, set)
+                    local hx, hy, hz = size.X / 2 + 2.5, size.Y / 2 + 3.5, size.Z / 2 + 2.5
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        local c = p ~= LP and p.Character
+                        local r = c and (c:FindFirstChild('HumanoidRootPart') or c.PrimaryPart)
+                        if r then
+                            local lp = cf:PointToObjectSpace(r.Position)
+                            if math.abs(lp.X) <= hx and math.abs(lp.Y) <= hy and math.abs(lp.Z) <= hz then set[p] = true end
+                        end
+                    end
+                end
+                function S.kaPlayersInBox(cf, size)
+                    local set, n = {}, 0
+                    playersIn(cf, size, set)
+                    for _ in pairs(set) do n = n + 1 end
+                    return n
+                end
+                local function cloneOwner(m) -- another player's summon / clone: hitting it is PvP
+                    local own = m:FindFirstChild('Clone_Owner')
+                    if own and own:IsA('StringValue') and own.Value ~= '' and own.Value ~= LP.Name then
+                        return Players:FindFirstChild(own.Value)
+                    end
+                    return nil
+                end
+                function S.kaPlayersNear(pos, radius)
+                    local n, nearest = 0, math.huge
+                    local function consider(r)
+                        local d = (r.Position - pos).Magnitude
+                        if d <= radius then n = n + 1 end
+                        if d < nearest then nearest = d end
+                    end
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        local c = p ~= LP and p.Character
+                        local r = c and (c:FindFirstChild('HumanoidRootPart') or c.PrimaryPart)
+                        if r then consider(r) end
+                    end
+                    local hs = workspace:FindFirstChild('Humanoids')
+                    if hs then
+                        for _, m in ipairs(hs:GetChildren()) do
+                            if m:IsA('Model') and m ~= LP.Character and cloneOwner(m) then
+                                local r = m:FindFirstChild('HumanoidRootPart') or m.PrimaryPart
+                                if r then consider(r) end
+                            end
+                        end
+                    end
+                    return n, nearest
+                end
+                local function counters(ct, kind) -- Menum.CounterType {Combat=1, All=2, AllExceptCombat=3}
+                    ct = tonumber(ct)
+                    return ct == 2 or (kind == 'skill' and ct == 3) or (kind == 'm1' and ct == 1)
+                end
+                local function iframed(m)
+                    local f = sf()
+                    if f and f.GetIFrame then
+                        local ok, fr = pcall(f.GetIFrame, m, LP.Character)
+                        if ok and fr ~= nil then return true end
+                    elseif m:FindFirstChild('iframe') or m:FindFirstChild('escapeiframe') then
+                        return true
+                    end
+                    -- GetIFrame reads SHC on the client; a mob's live skill sits in SHCS
+                    local sh = m:FindFirstChild('SHCS')
+                    local st = f and f.SkillStats
+                    if sh and sh:IsA('StringValue') and sh.Value ~= '' and st and st.Get then
+                        local ok, s = pcall(st.Get, sh.Value)
+                        if ok and type(s) == 'table' and s.iframe then return true end
+                    end
+                    return false
+                end
+                local hitCache = setmetatable({}, { __mode = 'k' }) -- [model] = { t = clock, [kind] = bool }
+                local function hittable(m, kind)
+                    local hum = m and m:FindFirstChildOfClass('Humanoid')
+                    if not (hum and hum.Health > 0) then return false end
+                    if not kind then return true end
+                    local blk = m:FindFirstChild('Blocking')
+                    if blk and blk:FindFirstChild('Perfect') and not m:FindFirstChild('PierceBlock') then return false end
+                    if counters(m:GetAttribute('NpcCounter'), kind) then return false end -- server check 1
+                    local f = sf()
+                    if f and f.GetCounter then -- server check 2 (independent of the attribute)
+                        local ok, t = pcall(f.GetCounter, m, m)
+                        if ok and counters(t, kind) then return false end
+                    end
+                    local dg = m:FindFirstChild('Dodge')
+                    if dg and dg:IsA('IntValue') and dg.Value > 0 and (kind == 'm1' or dg:GetAttribute('Mode') ~= 'Combat') then return false end
+                    if iframed(m) then return false end
+                    return true
+                end
+                function S.kaHittable(m, kind)
+                    if not m then return false end
+                    local key, now = kind or 'alive', os.clock()
+                    local c = hitCache[m]
+                    if c and now - c.t < 0.1 and c[key] ~= nil then return c[key] end
+                    local r = hittable(m, kind)
+                    if not c or now - c.t >= 0.1 then c = { t = now }; hitCache[m] = c end
+                    c[key] = r
+                    return r
+                end
+                function S.kaTargetsInBox(cf, size, kind)
+                    local pset = {}
+                    playersIn(cf, size, pset)
+                    local mobs, bosses, civs, perfect = {}, 0, 0, 0
+                    local hs = workspace:FindFirstChild('Humanoids')
+                    local parts
+                    if hs then
+                        params.FilterDescendantsInstances = { hs }
+                        local ok, res = pcall(workspace.GetPartBoundsInBox, workspace, cf, size, params)
+                        parts = ok and res or nil
+                    end
+                    local seen, me = {}, LP.Character
+                    for _, part in ipairs(parts or {}) do
+                        local m = part.Parent
+                        if m and not seen[m] and m ~= me and m:IsA('Model') and m.PrimaryPart ~= nil then
+                            seen[m] = true
+                            local owner = cloneOwner(m)
+                            local plr = Players:GetPlayerFromCharacter(m)
+                            if plr then
+                                if plr ~= LP then pset[plr] = true end
+                            elseif owner then
+                                pset[owner] = true
+                            elseif m:GetAttribute('IsMob') and S.kaHittable(m, nil) then
+                                local blk = m:FindFirstChild('Blocking')
+                                if blk and blk:FindFirstChild('Perfect') and not m:FindFirstChild('PierceBlock') then perfect = perfect + 1 end
+                                local slot = m.Parent
+                                local boss = slot ~= nil and slot:FindFirstChild('BossInfo') ~= nil
+                                if (slot and slot.Name:find('Civilian')) or (m:GetAttribute('CivilianState') ~= nil and not boss) then
+                                    civs = civs + 1
+                                elseif S.kaHittable(m, kind) then
+                                    mobs[#mobs + 1] = m
+                                    if boss then bosses = bosses + 1 end
+                                end
+                            end
+                        end
+                    end
+                    local players = 0
+                    for _ in pairs(pset) do players = players + 1 end
+                    return #mobs, players, mobs, bosses, civs, perfect
+                end
+            end)()
 
             local Tabs = {
                 Farm    = Window:AddTab('Farm'),
@@ -1582,7 +1888,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                 box:AddDropdown('SLFarmPriority', { Values = { 'Nearest', 'Lowest HP' }, Default = 1, Multi = false, Text = 'Target priority' })
                 box:AddSlider('SLFarmRange', { Text = 'Search range', Default = 200, Min = 30, Max = 600, Rounding = 0, Suffix = ' studs' })
                 box:AddDropdown('SLFarmHeightMode', { Values = { 'Auto (hitbox math)', 'Model size', 'Manual' }, Default = 1, Multi = false, Text = 'Height mode',
-                    Tooltip = 'Auto = per mob: just above the top of THAT mob\'s M1 box (its weapon preset), but low enough that YOUR box (your weapon) still reaches its body. Adapts to short mobs, big mobs and your weapon. Model size = old mode (mob top + your legs). Manual = fixed height below.' })
+                    Tooltip = 'Auto = per mob: just above the top of that mob M1 box (its weapon preset, highest combo), but low enough that YOUR box (your weapon, least-reaching combo) still reaches the top of its body. The body top counts its direct parts only (the server hit check ignores hats / accessories), so on accessory-heavy mobs Auto sits lower than it used to and may show [no safe gap]: it then sits low enough to keep hitting and the mob can reach you - keep Block when a mob attacks on. Model size = old mode (mob top + your legs). Manual = fixed height below.' })
                 box:AddSlider('SLFarmTweak', { Text = 'Height tweak', Default = 0.3, Min = -5, Max = 3, Rounding = 1, Suffix = ' studs',
                     Tooltip = 'Added on top of the computed height. Raise if the mob still hits you; lower if YOUR hits stop landing. (Under the mob is worse: the M1 box sits 1 stud BELOW the attacker\'s root, so from below the mob out-reaches you.)' })
                 box:AddSlider('SLFarmHeight', { Text = 'Manual height', Default = 5.8, Min = 0, Max = 12, Rounding = 1, Suffix = ' studs',
@@ -1604,7 +1910,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                 box:AddDropdown('SLDodgeWhere', { Values = { 'Up', 'Away', 'Up + away' }, Default = 3, Multi = false, Text = 'Dodge to' })
                 box:AddSlider('SLDodgeDist', { Text = 'Dodge distance', Default = 30, Min = 10, Max = 80, Rounding = 0, Suffix = ' studs' })
                 box:AddSlider('SLDodgeTime', { Text = 'Fallback dodge time', Default = 1.2, Min = 0.3, Max = 4, Rounding = 1, Suffix = ' s',
-                    Tooltip = 'Known skills (Upper Smash, Volcanic Conquest, Whirl Pool, Dead Calm, Thunder Clap, Predator Claws...) use their exact hit windows from the game\'s skill configs. This time is only for skills without timing data, unknown boss moves and telegraphs.' })
+                    Tooltip = 'Known skills (Upper Smash, Volcanic Conquest, Whirl Pool, Dead Calm, Thunder Clap, Predator Claws...) use their exact hit windows from the game\'s skill configs. This time is only for skills without timing data, unknown boss moves and persistent (never-ending) telegraphs. Normal telegraphs (cast by your target / a mob chasing you, or drawn within 40 studs of you) keep you out for as long as they are drawn.' })
                 box:AddSlider('SLDodgeLead', { Text = 'Dodge early / late by', Default = 0.15, Min = 0, Max = 0.6, Rounding = 2, Suffix = ' s',
                     Tooltip = 'Leave this much before the first hit and come back this much after the last one. Raise it with high ping or if skills still clip you.' })
                 box:AddToggle('SLDodgeUnknown', { Text = 'Dodge unknown moves too', Default = true,
@@ -1618,6 +1924,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                     if holding then holding = false; if IH then pcall(IH.VirtualRelease, 'Combat') end end
                 end
                 S.releaseM1 = releaseM1 -- Auto Parry's farm-block drops M1 before pressing block
+                S.farmGetTarget = function() return target end -- Mob Magnet: the farm's live target (no frame lag)
                 local function valid(m)
                     if not (m and m.Parent) then return false end
                     local hum = m:FindFirstChildOfClass('Humanoid')
@@ -1645,8 +1952,12 @@ if HUB_CURRENT ~= 'roguecopy' then
                     local chasing = grp and followers() or {}
                     local filter = Options.SLFarmTargets.Value
                     local fOn = type(filter) == 'table' and next(filter) ~= nil
-                    -- Auto Quest overrides the list (loose name match: "Mother Bear" vs "MotherBear")
-                    local qm = S.questMob and (S.questMob:lower():gsub('[^%w]', ''))
+                    -- Auto Quest overrides the list (loose name match: "Mother Bear" vs "MotherBear").
+                    -- A claimed Boss Hunt's boss (S.huntMob - set by Boss Hunts > "Farm prefers the
+                    -- hunted boss" only while it is alive and loaded) overrides both, at any loaded range.
+                    local qn = S.huntMob or S.questMob
+                    local qm = qn and (qn:lower():gsub('[^%w]', ''))
+                    local reach = S.huntMob and math.max(Options.SLFarmRange.Value, 600) or Options.SLFarmRange.Value
                     local byHp = Options.SLFarmPriority.Value == 'Lowest HP'
                     local best, bestScore
                     for _, m in ipairs(S.mobs()) do
@@ -1662,10 +1973,11 @@ if HUB_CURRENT ~= 'roguecopy' then
                                 and not (fOn and not filter[m.name])
                         end
                         if ok and (m.model == exclude or (noAggro and (chasing[m.model] or m.boss))
-                            or (near and (m.root.Position - near).Magnitude > radius)) then ok = false end
+                            or (near and (m.root.Position - near).Magnitude > radius)
+                            or (S.kaAvoid and (S.kaAvoid[m.model] or 0) > os.clock())) then ok = false end -- Kill Aura: a player keeps standing by it
                         if ok then
                             local d = (m.root.Position - root.Position).Magnitude
-                            if d <= Options.SLFarmRange.Value then
+                            if d <= reach then
                                 local score = byHp and (m.hum.Health + d * 0.001) or d
                                 if chasing[m.model] then score = score - 1e6 end -- already grouped under us
                                 if not bestScore or score < bestScore then best, bestScore = m.model, score end
@@ -1679,8 +1991,11 @@ if HUB_CURRENT ~= 'roguecopy' then
                 -- shrink is deliberately NOT applied to mob boxes (worst case = safe).
                 local CPm = S.req('CAM.Global.Combat_presets')
                 local CIP = S.req('CAM.Global.Character_info_provider')
-                local function presetIdx(t, i) return type(t) == 'table' and (t[i] or t.Default) or nil end
                 local function presetOf(who)
+                    -- Shared S.m1Preset (NpcMimicFolder.Equipped_Tool + CombatPreset normalised).
+                    -- The CIP path below is only a fallback: CIP.Get_equipped_tool returns nil for
+                    -- every NPC, so every mob here used to be sized as Combat.
+                    if S.m1Preset then return (S.m1Preset(who)) end
                     if not (CPm and type(CPm.Presets) == 'table') then return nil end
                     local tool
                     if CIP and CIP.Get_equipped_tool then
@@ -1689,25 +2004,40 @@ if HUB_CURRENT ~= 'roguecopy' then
                     end
                     return (tool and tool.Name and CPm.Presets[tool.Name]) or CPm.Presets.Combat
                 end
-                local function boxV(preset) -- centre offset from root, half height
-                    if not preset then return -1, 3.125 end
-                    return -1 + (presetIdx(preset.YOffsets, 1) or 0), (6.25 + (presetIdx(preset.Widths, 1) or 0)) / 2
-                end
+                -- Per-model cache: the body top + preset lookups used to run every frame
+                -- (CIP.Get_equipped_tool(LP) walks the whole inventory on each call).
+                local hCache = setmetatable({}, { __mode = 'k' }) -- [model] = { at, bb, top, mTop }
+                local myBot, myBotAt = -4.125, -1e9
+                -- Quest-mob check memo for RenderStepped: redone only when S.questMob, S.huntMob
+                -- or the target changes (no string building every frame).
+                local qmSeen, qmNorm, offQT, offQV, hmSeen, hmNorm = false, nil, nil, false, false, nil
                 local heightNote = ''
                 local function heightFor(model, mroot)
                     local mode = Options.SLFarmHeightMode.Value
                     if mode == 'Manual' then return math.clamp(Options.SLFarmHeight.Value + Options.SLFarmTweak.Value, -8, 16) end -- tweak applies in every mode
-                    local ok, cf, size = pcall(model.GetBoundingBox, model)
-                    local top = ok and (cf.Position.Y + size.Y / 2 - mroot.Position.Y) or 2.5
-                    local hum, root = S.hum(), S.root()
-                    local legs = (hum and hum.HipHeight or 2) + (root and root.Size.Y / 2 or 1)
-                    if mode == 'Model size' then return math.clamp(top + legs + Options.SLFarmTweak.Value, 1, 16) end
+                    local now = os.clock()
+                    local hc = hCache[model]
+                    if not hc or now - hc.at > 0.5 then
+                        local okB, bcf, bsz = pcall(model.GetBoundingBox, model)
+                        hc = {
+                            at = now,
+                            -- 'Model size' (old mode, unchanged): whole model incl. hats / weapon / hair
+                            bb = okB and (bcf.Position.Y + bsz.Y / 2 - mroot.Position.Y) or 2.5,
+                            -- Auto: DIRECT-CHILD parts only (what the server's box query sees)
+                            top = S.bodyTop(model, mroot) or 2.5,
+                            -- mob box top = the highest over ALL its combo hits (its real preset)
+                            mTop = S.m1BoxSpan(presetOf(model), 'top'),
+                        }
+                        hCache[model] = hc
+                    end
+                    local legs = S.m1Legs() -- the same number Auto Parry's reach test uses
+                    if mode == 'Model size' then return math.clamp(hc.bb + legs + Options.SLFarmTweak.Value, 1, 16) end
+                    local top = hc.top
                     -- Auto: feet just above the mob's box top, but our box bottom still
                     -- inside its body. No gap (tall mob box / short body) -> favour hitting.
-                    local mc, mh = boxV(presetOf(model))
-                    local pc, ph = boxV(presetOf(LP))
-                    local lo = mc + mh + legs + 0.15            -- feet clear the mob's box
-                    local hi = top - 0.3 - pc + ph              -- our box still reaches its top
+                    if now - myBotAt > 0.5 then myBotAt, myBot = now, S.m1BoxSpan(presetOf(LP), 'bottom') end
+                    local lo = hc.mTop + legs + S.FARM_CLEAR    -- feet clear the mob's box (worst combo)
+                    local hi = top - 0.3 - myBot                -- our box (shallowest combo) still reaches its top
                     local want = lo + Options.SLFarmTweak.Value
                     heightNote = (lo > hi) and '  [no safe gap]' or ''
                     return math.clamp(math.min(want, hi), 1, 20)
@@ -1864,11 +2194,53 @@ if HUB_CURRENT ~= 'roguecopy' then
                     if sh then watchShcs(sh) end
                     S.bindLife(model, model.ChildAdded:Connect(function(c) if c.Name == 'SHCS' or c.Name == 'SHC' then watchShcs(c) end end))
                 end
+                S.farmHookMob = hookMob -- Mob Magnet: parked mobs feed the farm's skill dodge
+                -- Boss telegraphs (Effects/Core/Telegraph.lua): the client draws each one as
+                -- workspace.Debree["<id>-Telegraph"] - created EMPTY on "Start" (plus a Highlight
+                -- adorned to the caster when it flashes); the shape plates come with a later
+                -- phase call and are placed on the next Heartbeat; Cancel renames it "--" +
+                -- sets Cancelled; the plates are removed a Fade after the telegraph's Duration,
+                -- except on a Persist telegraph (attribute set on the folder), whose plates stay.
+                -- Before: ANY telegraph on the map hopped us off for a fixed time (and a 2s
+                -- telegraph landed after the 1.2s hop). Now: only one cast by our target / a mob
+                -- chasing us, or whose plate comes within TELE_NEAR studs, and we stay off for
+                -- as long as it is drawn (+ lead); a Persist one for the fallback dodge time.
+                local TELE_NEAR, teleUntil = 40, 0
+                local function teleMine(f, r)
+                    local chasing = followers()
+                    for _, d in ipairs(f:GetDescendants()) do
+                        if d:IsA('Highlight') then
+                            local a = d.Adornee
+                            if a and (a == target or chasing[a]) then return true end
+                        elseif d:IsA('BasePart') and d.Position.Magnitude > 1 then -- plates sit at the origin until placed
+                            local flat = (d.Position - r.Position) * Vector3.new(1, 0, 1)
+                            if flat.Magnitude - math.max(d.Size.X, d.Size.Y, d.Size.Z) / 2 <= TELE_NEAR then return true end
+                        end
+                    end
+                    return false
+                end
+                local function watchTelegraph(f)
+                    local persist = f:GetAttribute('Persist') == true
+                    local t0, mineAt, seen = os.clock(), nil, false
+                    while not S.dead and f.Parent and not f:GetAttribute('Cancelled') and os.clock() - t0 < 8 do
+                        local drawn = f:FindFirstChildWhichIsA('BasePart', true) ~= nil or f:FindFirstChildWhichIsA('Highlight', true) ~= nil
+                        if drawn then seen = true elseif seen then break end -- plates / highlight gone = it has landed
+                        if not mineAt then
+                            local r = S.root()
+                            if r and target and teleMine(f, r) then mineAt = os.clock(); dodgeWhy = 'telegraph' end
+                            if not mineAt and os.clock() - t0 > 3 then return end -- never came near us
+                        end
+                        -- a Persist telegraph never removes its plates: out for the fallback time only
+                        if mineAt and persist and os.clock() - mineAt > Options.SLDodgeTime.Value then break end
+                        if mineAt and Toggles.SLFarmDodge.Value then teleUntil = math.max(teleUntil, os.clock() + Options.SLDodgeLead.Value + 0.05) end
+                        RunService.Heartbeat:Wait()
+                    end
+                end
                 task.spawn(function()
                     local debree = workspace:FindFirstChild('Debree') or workspace:WaitForChild('Debree', 60)
                     if not debree then return end
                     htrack(debree.ChildAdded:Connect(function(f)
-                        if f.Name:match('%-Telegraph$') and target then triggerDodge(target, 'telegraph', 0, Options.SLDodgeTime.Value) end
+                        if f.Name:match('%-Telegraph$') and target and Toggles.SLFarmDodge.Value then task.spawn(watchTelegraph, f) end
                     end))
                 end)
                 -- Release cues from the skill's own server VFX broadcast (EffectsEvent
@@ -1906,6 +2278,10 @@ if HUB_CURRENT ~= 'roguecopy' then
                         end
                         local w = VFX_WIN[key]
                         if not (w and target and typeof(who) == 'Instance') then return end
+                        -- Only a caster the dodge would accept may replace the anim estimate: a far
+                        -- player's Upper Smash used to wipe the window we were following for our target.
+                        local r, mr = S.root(), who:FindFirstChild('HumanoidRootPart')
+                        if not (who == target or (r and mr and (mr.Position - r.Position).Magnitude < 30)) then return end
                         dTrack = nil -- the real release time beats the anim estimate
                         triggerDodge(who, (name:gsub('VFX$', '')), w[1], w[2])
                     end))
@@ -1926,10 +2302,40 @@ if HUB_CURRENT ~= 'roguecopy' then
                     end
                     local root = S.root()
                     if not root then releaseM1(); S.farmLocked = false; return end
-                    if not valid(target) then
-                        target = nil; releaseM1(); S.farmLocked = false
-                        if os.clock() - lastPick > 0.25 then lastPick = os.clock(); target = pick() end -- scan 4x/s, not every frame
-                    elseif Toggles.SLFarmGroup.Value and S.farmLocked and os.clock() - lastPick > 0.25 then
+                    if target and target == S.huntDrop then target = nil end -- Boss Hunts gave up on this boss
+                    -- Auto Quest switched mobs (or is handing in: its no-match questMob sentinel): a target
+                    -- picked for the old quest stayed "valid", so the farm finished it (and its
+                    -- group) first. Same loose name match as pick(); memoised (qmSeen / offQT), so no
+                    -- strings are built per frame. A claimed hunt's boss (S.huntMob) is never off-quest.
+                    if S.questMob ~= qmSeen or S.huntMob ~= hmSeen then
+                        qmSeen, hmSeen = S.questMob, S.huntMob
+                        qmNorm = type(qmSeen) == 'string' and (qmSeen:lower():gsub('[^%w]', '')) or nil
+                        hmNorm = type(hmSeen) == 'string' and (hmSeen:lower():gsub('[^%w]', '')) or nil
+                        offQT = nil
+                    end
+                    if target ~= offQT then
+                        offQT = target
+                        local tn = qmNorm and target and target.Parent and (target.Parent.Name:lower():gsub('[^%w]', ''))
+                        offQV = (tn and tn ~= qmNorm and tn ~= hmNorm) or false
+                    end
+                    if not valid(target) or offQV or (S.kaAvoid and (S.kaAvoid[target] or 0) > os.clock()) then
+                        -- Target died (finisher), left, is off-quest, or Kill Aura skips it (a player keeps
+                        -- standing by it, S.kaAvoid): re-pick on that SAME frame instead of idling up to
+                        -- 0.25s for the next scan slot (the throttle only paces repeat scans while nothing
+                        -- is in range). M1 stays held when the next mob is already under us (a grouped
+                        -- follower wins the pick); the travel / dodge branches release it anyway.
+                        local lost = target ~= nil
+                        target = nil; S.farmLocked = false
+                        if lost or os.clock() - lastPick > 0.25 then lastPick = os.clock(); target = pick(S.huntDrop) end -- scan 4x/s, not every frame
+                        if not target then releaseM1() end
+                    elseif S.huntMob and hmNorm and os.clock() - lastPick > 0.5 and target.Parent
+                        and (target.Parent.Name:lower():gsub('[^%w]', '')) ~= hmNorm then
+                        -- a claimed hunt's boss came into reach: leave the current mob for it
+                        lastPick = os.clock()
+                        local b = pick()
+                        if b and b ~= target then target = b; releaseM1(); S.farmLocked = false end
+                    elseif Toggles.SLFarmGroup.Value and S.farmLocked and os.clock() - lastPick > 0.25
+                        and os.clock() >= (S.kaAimUntil or 0) then -- never retarget in a Kill Aura cast window
                         -- Grouping: once our target is chasing us and we have room for
                         -- another follower, go tag the nearest un-aggroed mob. The first
                         -- one follows us over; both end up under our M1 box.
@@ -1954,24 +2360,57 @@ if HUB_CURRENT ~= 'roguecopy' then
                             setStatus(('Returning to farm spot (%.0f studs)'):format((root.Position - back).Magnitude))
                             return
                         end
-                        S.noclip('farm', false); setStatus('No mob in range (go near a camp)'); return
+                        S.noclip('farm', false)
+                        setStatus((S.kaAvoidUntil or 0) > os.clock() and 'Skipping a mob a player stands next to (Kill Aura, 20s) - no other mob in range'
+                            or 'No mob in range (go near a camp)')
+                        return
                     end
                     if returning then returning = false; S.stopGlide() end -- found one: the farm moves us now
                     S.noclip('farm', true)
                     hookMob(target)
                     local mroot = target.HumanoidRootPart
-                    S.farmLastPos, S.farmLastMob = mroot.Position, S.questMob
+                    -- The farm spot is where regular mobs are farmed. A detour to a claimed hunt's
+                    -- boss (S.huntMob) keeps it, so the return-glide brings us back afterwards
+                    -- (unless that boss is also Auto Quest's own quest mob).
+                    local onHunt = false
+                    if hmNorm and target.Parent then -- (hmNorm / qmNorm: the memoised names above)
+                        local tn = (target.Parent.Name:lower():gsub('[^%w]', ''))
+                        onHunt = tn == hmNorm and tn ~= qmNorm
+                    end
+                    if not onHunt then
+                        S.farmLastPos, S.farmLastMob = mroot.Position, S.questMob
+                    elseif not S.farmLastPos then
+                        S.farmLastPos, S.farmLastMob = root.Position, S.questMob -- no spot yet: where the detour began
+                    end
                     local goal = mroot.Position + Vector3.new(0, heightFor(target, mroot), 0)
                     local flat = mroot.CFrame.LookVector * Vector3.new(1, 0, 1)
                     if flat.Magnitude < 0.1 then flat = Vector3.new(0, 0, -1) end
+                    local mobFlat = flat -- the mob's own facing (skill dodge Away = behind IT, not behind our box)
+                    -- Kill Aura (M1 box packing): may swap in a spot + facing whose M1 box
+                    -- covers more mobs, and says when M1 must wait (target countering /
+                    -- perfect-blocking, a punishing mob or a player inside our box).
+                    local kaN, kaHold, kaSnap = 0, nil, false
+                    if S.kaPose then
+                        local okK, g2, f2, n2, h2, s2 = pcall(S.kaPose, target, mroot, goal, flat)
+                        if okK and typeof(g2) == 'Vector3' and typeof(f2) == 'Vector3' and f2.Magnitude > 0.1 then
+                            goal, flat, kaN, kaHold, kaSnap = g2, f2, tonumber(n2) or 0, h2, s2 == true
+                        end
+                    end
                     -- skill dodge: hop out of range for the skill's active time, then snap back
                     followTrack()
                     local nowD = os.clock()
+                    -- Kill Aura reads these so it never starts (or keeps holding) a skill into a dodge
+                    S.farmDodgeFrom, S.farmDodgeUntil = dodgeFrom, dodgeUntil
+                    S.farmHoldOutFrom, S.farmHoldOutUntil = holdOutFrom, holdOutUntil
                     if holdOutWho and not (holdOutWho.Parent and valid(holdOutWho)) then holdOutUntil = 0; holdOutWho = nil end
-                    local charging = nowD >= holdOutFrom and nowD < holdOutUntil
+                    -- open-ended: a charge (Stone Grab) or a live telegraph. The telegraph hold-out only
+                    -- counts near the mob: travelling to a far target past someone else's plate must not
+                    -- jump us to goal + offset in one frame (the dodge branch writes the root directly).
+                    local charging = (nowD >= holdOutFrom and nowD < holdOutUntil)
+                        or (nowD < teleUntil and (goal - root.Position).Magnitude <= Options.SLDodgeDist.Value + 8)
                     if charging or (nowD >= dodgeFrom and nowD < dodgeUntil) then -- inside the skill's hit window
                         local where, dist = Options.SLDodgeWhere.Value, Options.SLDodgeDist.Value
-                        local away = -flat.Unit -- behind the mob, off its facing
+                        local away = -mobFlat.Unit -- behind the mob, off its facing
                         local off = (where == 'Up' and Vector3.new(0, dist, 0))
                             or (where == 'Away' and away * dist)
                             or (away * dist * 0.7 + Vector3.new(0, dist * 0.7, 0))
@@ -1986,6 +2425,10 @@ if HUB_CURRENT ~= 'roguecopy' then
                         return
                     end
                     local delta = goal - root.Position
+                    if kaSnap and S.farmLocked and delta.Magnitude > 6 and delta.Magnitude <= 20 then
+                        root.CFrame = CFrame.lookAt(goal, goal + flat.Unit) -- Kill Aura just changed the spot: short hop, keep swinging
+                        delta = Vector3.zero
+                    end
                     if delta.Magnitude > 6 and os.clock() - lastDodgeEnd < 0.3 then
                         root.CFrame = CFrame.lookAt(goal, goal + flat.Unit) -- snap straight back after a dodge
                         delta = Vector3.zero
@@ -1999,8 +2442,24 @@ if HUB_CURRENT ~= 'roguecopy' then
                         setStatus(('-> %s (%.0f studs)'):format(target.Parent and target.Parent.Name or target.Name, delta.Magnitude))
                     else -- locked on its head
                         S.farmLocked = true
-                        root.CFrame = CFrame.lookAt(goal, goal + flat.Unit)
-                        if Toggles.SLFarmM1.Value and IH and os.clock() >= (S.farmBlockUntil or 0) then -- paused while block is held
+                        -- Kill Aura cast window (until S.kaAimUntil): face the point it scored
+                        -- (skill boxes are root.CFrame * offset, so facing = where they land) and
+                        -- sink by S.kaDrop ONLY inside S.kaDropWins (around each server hit), so
+                        -- between hits we sit on the usual safe perch. Outside it: the head lock.
+                        if S.kaAim and os.clock() < (S.kaAimUntil or 0) then
+                            local nowK, sink = os.clock(), 0
+                            if (S.kaDrop or 0) > 0 and type(S.kaDropWins) == 'table' then
+                                for _, w in ipairs(S.kaDropWins) do
+                                    if nowK >= w[1] and nowK <= w[2] then sink = S.kaDrop; break end
+                                end
+                            end
+                            local castAt = goal - Vector3.new(0, sink, 0)
+                            local face = (S.kaAim - castAt) * Vector3.new(1, 0, 1)
+                            root.CFrame = CFrame.lookAt(castAt, castAt + ((face.Magnitude > 0.5) and face.Unit or flat.Unit))
+                        else
+                            root.CFrame = CFrame.lookAt(goal, goal + flat.Unit)
+                        end
+                        if Toggles.SLFarmM1.Value and IH and not kaHold and os.clock() >= (S.farmBlockUntil or 0) then -- paused while block is held / Kill Aura says wait
                             -- Re-press every 0.35s: the game's hold-chain stops if a
                             -- punch is refused (e.g. we got stunned), a fresh press restarts it.
                             local now = os.clock()
@@ -2013,15 +2472,842 @@ if HUB_CURRENT ~= 'roguecopy' then
                             releaseM1()
                         end
                         local hum = target:FindFirstChildOfClass('Humanoid')
-                        local _, nChasing = followers()
-                        setStatus(('Farming %s  %d/%d HP  h=%.1f%s%s'):format(target.Parent and target.Parent.Name or target.Name,
+                        local chasingSet, nChasing = followers()
+                        -- the grouped mob under us: its skills / charges dodge too (was: only the target was hooked)
+                        for m in pairs(chasingSet) do hookMob(m) end
+                        setStatus(('Farming %s  %d/%d HP  h=%.1f%s%s%s%s'):format(target.Parent and target.Parent.Name or target.Name,
                             math.floor(hum.Health + 0.5), math.floor(hum.MaxHealth + 0.5), goal.Y - mroot.Position.Y, heightNote,
-                            nChasing > 0 and ('  [%d grouped]'):format(nChasing) or ''))
+                            nChasing > 0 and ('  [%d grouped]'):format(nChasing) or '',
+                            kaN >= 2 and ('  [%d in box]'):format(kaN) or '',
+                            kaHold and ('  [M1 wait: %s]'):format(tostring(kaHold)) or (S.kaStat or '')))
                     end
                     root.AssemblyLinearVelocity = Vector3.zero
                 end))
                 if not IH then box:AddLabel('InputHandler not loaded - Hold M1 unavailable here.', true) end
                 htrack({ Disconnect = function() releaseM1() end })
+            end)()
+            -- ================================================================
+            -- KILL AURA: M1 box packing - one swing hits every mob in the box
+            -- ================================================================
+            -- Combat_presets.Get_Players_For_Combat (CAM/Global/Combat_presets.lua:314-442)
+            -- builds ONE box from our server-side root at hit time and returns every
+            -- Humanoid model with a direct-child part inside it (Utility.GetModelInRegion,
+            -- Utility.lua:1216-1242, over workspace.Humanoids, MaxParts 350): no cap, no
+            -- distance / LOS check, the client sends no target. M1 speed is server-gated
+            -- (Check_can_do_combat_server), so the only multiplier is how many mobs share
+            -- that box. Idle camp mobs rarely stand that close, so in practice this packs
+            -- the (max 2) mobs Group mobs pulls under us. ~5x/s it tries spots above the
+            -- target / the pack centre / each mob-pair midpoint, facing each mob, and
+            -- picks the box that holds the most mobs while our feet stay above every
+            -- nearby mob's own box (same clearance maths as heightFor, S.kaClearance).
+            -- It also guards M1: never into a player, and waits out counters / perfect
+            -- blocks (capped, so a stuck state can never freeze the farm).
+            ;(function()
+                local box = Tabs.Farm:AddRightGroupbox('Kill Aura')
+                S.kaBox = box -- the Skill aura adds its part below (one Kill Aura groupbox)
+                box:AddLabel('The server M1 box hits EVERY mob inside it (no cap). Camp mobs rarely stand that close, so the real gain is the 2 mobs Group mobs pulls under you: up to ~2 mobs/hit. The hit check below measures it.', true)
+                box:AddToggle('SLKAMulti', { Text = 'Multi-target M1', Default = false,
+                    Tooltip = 'Off by default: it changes where the farm sits. About 5x/s it tries spots above the target, above the pack centre and above each mob-pair midpoint, facing each mob, and moves only when that box holds 2+ mobs and beats sitting on the target head (min 1s per spot, never chases a walking target). Turn it on after Reset hit check shows more than 1.0 mobs/hit at your camp.' })
+                box:AddSlider('SLKARadius', { Text = 'Pack radius', Default = 12, Min = 6, Max = 20, Rounding = 0, Suffix = ' studs',
+                    Tooltip = 'Mobs this close (flat distance) to the target are packed into the box.' })
+                box:AddSlider('SLKAMargin', { Text = 'M1 box safety margin', Default = 0.5, Min = 0, Max = 2, Rounding = 1, Suffix = ' studs',
+                    Tooltip = 'A mob only counts if it is inside your box shrunk by this much front / back / sides (ping, mob drift; height is exact). Raise it if the hit check below shows fewer mobs/hit than the box predicts.' })
+                box:AddToggle('SLKAOnlyWanted', { Text = 'Only pack farm targets', Default = true,
+                    Tooltip = 'Only mobs the farm itself would pick (quest mob / Only-these-mobs list / civilian + boss toggles) count; other mobs never pull the spot. (Either way a Kill Aura spot never clips a civilian while Skip civilians is on, or a boss while Include bosses is off.)' })
+                box:AddToggle('SLKADefense', { Text = 'Respect counters / perfect blocks', Default = true,
+                    Tooltip = 'Server check_victim: a mob in counter stance (NpcCounter 1/2, a Counter value, a counter skill) or holding a PERFECT block punishes the swing. M1 waits while the target (or a mob inside your box) is in that state - max 2s each time, then one swing takes the counter (Auto Parry / skill dodge cover the riposte). Dodge charges / i-frames cost nothing (M1 keeps going and burns them); such mobs just never count toward packing.' })
+                box:AddToggle('SLKANoPvP', { Text = 'Never swing into players', Default = true,
+                    Tooltip = 'Player characters live in workspace.Humanoids too, so the M1 box hits them. M1 waits while a player (or a player clone) is inside the reach of any of your combo hits. If one stays by the target for 5s the farm skips that mob for 20s and takes another.' })
+                local statLbl = box:AddLabel('Hit check: waiting for farm swings', true)
+
+                local V3 = Vector3.new
+                local CPm
+                local function presets()
+                    CPm = CPm or S.req('CAM.Global.Combat_presets')
+                    return CPm and type(CPm.Presets) == 'table' and CPm.Presets or nil
+                end
+                local function pidx(t, i) return type(t) == 'table' and (t[i] or t.Default) or nil end
+                local function flat2(v) return V3(v.X, 0, v.Z) end
+                -- S.req, but a failed require is only retried every 30s (not every frame).
+                local modMemo = {}
+                local function reqMemo(path)
+                    local e = modMemo[path]
+                    if e and (e.m or os.clock() - e.t < 30) then return e.m or nil end
+                    local m = S.req(path)
+                    modMemo[path] = { m = m or false, t = os.clock() }
+                    return m
+                end
+                -- The server's last_magasd IntValue under a root (Combat_presets.lua:331-367):
+                -- created on the first swing, raised by the swing's own speed, 0 again 0.75s
+                -- after its last change. Server-created, so it replicates.
+                local function lmOf(part)
+                    local v = part and part:FindFirstChild('last_magasd')
+                    return (v and v:IsA('ValueBase') and tonumber(v.Value)) or 0
+                end
+                -- Reach bonus u1 (:368-389): max(preset MinHitboxSize, tool floor) + Reaches[combo].
+                local function reachU1(preset, idx, floor)
+                    local u1 = math.max(preset.MinHitboxSize or 0, tonumber(floor) or 0)
+                    local r = pidx(preset.Reaches, idx); if r then u1 = u1 + r end
+                    return u1
+                end
+
+                -- The server M1 box for a HYPOTHETICAL root CFrame with zero velocity:
+                -- Get_Players_For_Combat with |vel| <= 1 -> dir = LookVector (:325-330);
+                -- ext = max(u1, min(last_magasd, 7)) (:396-401, u1 < 0: max(lm + u1, 1));
+                -- floor = the equipped TOOL preset's MinHitboxSize / AccessoryHitBoxAdditions
+                -- (:369-386); minExt = the last_magasd to assume (default 1). own = true
+                -- drops Widths: the decompiled server never applies them to the size
+                -- (:419-421), so OUR box is modelled without them (smaller = safe count),
+                -- mob boxes keep them (bigger = safe clearance). Returns CFrame, Size.
+                function S.m1BoxAt(cf, preset, idx, npc, minExt, floor, own)
+                    preset = preset or {}
+                    idx = idx or 1
+                    local u1 = reachU1(preset, idx, floor)
+                    local lv = cf.LookVector
+                    local dir = V3(lv.X, 0, lv.Z)
+                    dir = dir.Magnitude > 0.01 and dir.Unit or V3(0, 0, -1)
+                    local ext = minExt or 1
+                    if u1 < 0 then ext = math.max(ext + u1, 1) else ext = math.max(u1, ext) end
+                    local base = cf * CFrame.new(0, -1, 0)
+                    local yo = pidx(preset.YOffsets, idx); if yo then base = base * CFrame.new(0, yo, 0) end
+                    local addW, addD = 0, 0
+                    if idx == 7 then addW, addD = 4, 7 end
+                    local w = own and 0 or (pidx(preset.Widths, idx) or 0)
+                    local dp = pidx(preset.Depths, idx) or 0
+                    local scale = npc and (1 / 1.2) or 1
+                    local size = V3(addW + 6 + w, w + 6.25, math.max(addD + 9 + dp, 1)) * scale + V3(0, 0, ext)
+                    local p = base.Position
+                    local out = CFrame.lookAt(p, p + dir) * CFrame.new(0, 0, -ext * 0.75)
+                    local zo = pidx(preset.ZOffsets, idx); if zo then out = out * CFrame.new(0, 0, -zo) end
+                    return out, size
+                end
+
+                -- Our preset, exactly like CU/Combat.lua get_equipped_Combat + punch():
+                -- the tool's Items[].CombatPreset, else a fighting style from CurPower with a
+                -- <name>_Combat_Anims folder, else the tool name; unknown weapon items fall
+                -- back to Items[name].CombatPreset or 'Regular Katana'. Cached 1s.
+                -- 3rd return = reach floor from the TOOL's own preset (server :369-386).
+                local myCache
+                local function myPreset()
+                    local P = presets(); if not P then return nil, '?', 0 end
+                    local now = os.clock()
+                    if myCache and now - myCache.t < 1 then return myCache.p, myCache.n, myCache.f end
+                    local Items = S.req('CAM.Global.Collectibles.Items')
+                    local CIP = S.req('CAM.Global.Character_info_provider')
+                    local tool
+                    if CIP and CIP.Get_equipped_tool then
+                        local ok, t = pcall(CIP.Get_equipped_tool, LP)
+                        if ok then tool = t end
+                    end
+                    local tname = tool and tool.Name
+                    local item = (tname and type(Items) == 'table') and Items[tname] or nil
+                    local name
+                    if type(item) ~= 'table' or item.CombatPreset == nil or item.CombatPreset == 'Combat' then
+                        local cp = S.find('CAM.Client.Controllers.Skills_Provider.CurPower')
+                        local anims = S.find('Assets.Animations')
+                        if cp and anims then
+                            for _, v in ipairs(string.split(tostring(cp.Value), ',')) do
+                                if v ~= '' and anims:FindFirstChild(v .. '_Combat_Anims') then name = v; break end
+                            end
+                        end
+                        name = name or tname
+                    else
+                        name = tname
+                    end
+                    local p = name and P[name] or nil
+                    if not p and name and type(Items) == 'table' and type(Items[name]) == 'table' then
+                        name = Items[name].CombatPreset or 'Regular Katana'
+                        p = P[name]
+                    end
+                    if not p then p, name = P.Combat, 'Combat' end
+                    local floor = 0
+                    local tp = tname and P[tname] or nil
+                    if type(tp) == 'table' then
+                        floor = tonumber(tp.MinHitboxSize) or 0
+                        local add = tp.AccessoryHitBoxAdditions
+                        local acc = type(add) == 'table' and LP.Character and LP.Character:FindFirstChild('Accessories')
+                        if acc then
+                            for k, v in pairs(add) do
+                                if type(v) == 'number' and acc:FindFirstChild(tostring(k)) then floor = math.max(floor, v) end
+                            end
+                        end
+                    end
+                    myCache = { p = p, n = name, f = floor, t = now }
+                    return p, name, floor
+                end
+                -- The combo we just threw + when: CU/Combat.lua:107-118 / :152-163 writes it to
+                -- Player_Service.Values.<me>.ComboTrackerClient (.Value = hit, .Time = os.clock())
+                -- on every punch - an instance, so no reliance on sharing the game's require
+                -- cache. Fallback: the Combat_presets.Last_Combo / Last_Punched fields.
+                local function comboTracker()
+                    local vals = S.values()
+                    local ct = vals and vals:FindFirstChild('ComboTrackerClient')
+                    local tv = ct and ct:FindFirstChild('Time')
+                    if ct and tv then return tonumber(ct.Value), tonumber(tv.Value) end
+                    if presets() then return tonumber(CPm.Last_Combo), tonumber(CPm.Last_Punched) end
+                    return nil, nil
+                end
+                -- Next combo hit (CU/Combat.lua:164-169: wraps after Max or 7; ComboValue resets
+                -- to 1 combo_duration after the last punch, :48-68).
+                local function nextCombo(preset)
+                    local mx = math.clamp(tonumber(preset and preset.Max) or 5, 1, 7)
+                    local last, at = comboTracker()
+                    local dur = (CPm and tonumber(CPm.combo_duration)) or 1.35
+                    if not (last and at) or last < 1 or os.clock() - at > dur then return 1 end
+                    if last >= mx or last == 7 then return 1 end
+                    return last + 1
+                end
+                -- In the air the Max hit is thrown as hit 7 (Main_Combat_Script_Client.lua:50-58,
+                -- :115-117); hovering over a mob is always in the air.
+                local function airborne()
+                    local h = S.hum()
+                    if not h then return true end
+                    local fm = h.FloorMaterial
+                    return fm == nil or fm == Enum.Material.Air
+                end
+                -- Which last_magasd the server will use for OUR hit. With the swing flag set it
+                -- is raised to >= 1 (our |dir| when still) BEFORE ext is computed (:361-367);
+                -- once we have seen it >= 1 while swinging, that is proven, so ext is in
+                -- [1, current]. Until then also model 0 (a zero-length aim vector: :396-402).
+                local lmProven = false
+                local function extSet(root)
+                    local lm = math.min(lmOf(root), 7)
+                    if lm >= 1 then lmProven = true end
+                    if not lmProven then return { 0, 1 } end
+                    if lm > 1 then return { 1, lm } end
+                    return { 1 }
+                end
+                -- Mob preset: AiPrerequistes.NpcMimicFolder.Equipped_Tool (read directly -
+                -- AiMimic:GetFolder would CREATE the folder), normalised like punch():
+                -- Presets[v] or Presets[Items[v].CombatPreset or 'Regular Katana']; none = Combat.
+                local mobCache = setmetatable({}, { __mode = 'k' })
+                local function mobPreset(model)
+                    local P = presets(); if not P then return nil end
+                    local c = mobCache[model]
+                    if c and os.clock() - c.t < 5 then return c.p end
+                    local v = S.val(model, 'AiPrerequistes', 'NpcMimicFolder', 'Equipped_Tool')
+                    local p
+                    if v == nil or tostring(v) == '' then
+                        p = P.Combat
+                    else
+                        v = tostring(v)
+                        p = P[v]
+                        if not p then
+                            local Items = S.req('CAM.Global.Collectibles.Items')
+                            local it = type(Items) == 'table' and Items[v] or nil
+                            p = P[(type(it) == 'table' and it.CombatPreset) or 'Regular Katana'] or P.Combat
+                        end
+                    end
+                    mobCache[model] = { p = p, t = os.clock() }
+                    return p
+                end
+                -- A MOB box top over EVERY combo (centre root -1 +YOffsets, height 6.25 + Widths);
+                -- Widths kept and the NPC /1.2 shrink left off on purpose (worst case = safe).
+                local topCache, botCache = setmetatable({}, { __mode = 'k' }), setmetatable({}, { __mode = 'k' })
+                local function topRel(preset)
+                    if not preset then return 2.125 end
+                    local t = topCache[preset]; if t then return t end
+                    t = -math.huge
+                    for c = 1, math.max(tonumber(preset.Max) or 5, 7) do
+                        t = math.max(t, -1 + (pidx(preset.YOffsets, c) or 0) + (6.25 + (pidx(preset.Widths, c) or 0)) / 2)
+                    end
+                    topCache[preset] = t
+                    return t
+                end
+                -- OUR box's HIGHEST bottom over our combos (the hit that reaches least far down),
+                -- without Widths (the smaller reading of the server box).
+                local function bottomRel(preset)
+                    if not preset then return -4.125 end
+                    local b = botCache[preset]; if b then return b end
+                    b = -math.huge
+                    local mx = math.clamp(tonumber(preset.Max) or 5, 1, 7)
+                    for c = 1, 7 do
+                        if c <= mx or c == 7 then
+                            b = math.max(b, -1 + (pidx(preset.YOffsets, c) or 0) - 6.25 / 2)
+                        end
+                    end
+                    botCache[preset] = b
+                    return b
+                end
+                -- How far (flat) a mob's box can reach from its root, any facing: it turns to
+                -- face you, walking stretches ext (:325-327) and the server keeps the larger
+                -- ext in the replicated last_magasd for 0.75s after it stops (:331-367).
+                local function reachOf(preset, mroot)
+                    preset = preset or {}
+                    local vel = mroot.AssemblyLinearVelocity
+                    local m = math.clamp(vel.Magnitude / 5, 0, 13)
+                    m = (m <= 5) and m / 2 or m
+                    local e0 = m * 1.25
+                    e0 = (e0 <= 1) and 1 or math.min(e0, 7)
+                    e0 = math.max(e0, math.min(lmOf(mroot), 7))
+                    local best = 0
+                    for _, c in ipairs({ 1, 2, 3, 4, 5, 7 }) do
+                        local u1 = (preset.MinHitboxSize or 0) + (pidx(preset.Reaches, c) or 0)
+                        local e = (u1 < 0) and math.max(e0 + u1, 1) or math.max(u1, e0)
+                        local addW, addD = 0, 0
+                        if c == 7 then addW, addD = 4, 7 end
+                        local depth = math.max(addD + 9 + (pidx(preset.Depths, c) or 0), 1) + e
+                        local cz = 0.75 * e + (pidx(preset.ZOffsets, c) or 0)
+                        local hw = (addW + 6 + (pidx(preset.Widths, c) or 0)) / 2
+                        local fz = math.max(cz + depth / 2, depth / 2 - cz)
+                        best = math.max(best, math.sqrt(fz * fz + hw * hw))
+                    end
+                    return best + 1.5
+                end
+                -- Top of the mob's DIRECT-CHILD, queryable parts (all the server region
+                -- query can see: GetModelInRegion takes part.Parent), relative to its root.
+                local function bodyTop(model, mroot)
+                    local top
+                    for _, p in ipairs(model:GetChildren()) do
+                        if p:IsA('BasePart') and p.CanQuery then
+                            local cf, s = p.CFrame, p.Size
+                            local hy = 0.5 * (math.abs(cf.RightVector.Y) * s.X + math.abs(cf.UpVector.Y) * s.Y + math.abs(cf.LookVector.Y) * s.Z)
+                            local t = p.Position.Y + hy
+                            if not top or t > top then top = t end
+                        end
+                    end
+                    return top and (top - mroot.Position.Y) or 2.5
+                end
+                -- heightFor (Auto) + the pose solver share this: lo = root height where our
+                -- feet clear the mob's highest box (any combo); hi = highest root where our
+                -- least-reaching combo still touches the top of its direct-child parts.
+                function S.kaClearance(model, mroot, legs)
+                    if not presets() then return nil end
+                    local lo = topRel(mobPreset(model)) + legs + 0.15
+                    local hi = bodyTop(model, mroot) - 0.3 - bottomRel((myPreset()))
+                    return lo, hi
+                end
+
+                -- ---- defence state (Checker.check_victim :816-1123, read-only) ----------
+                -- Values folder = Player_Service.Values[<model name>] or the model itself
+                -- (Utility.getvaluesfolder :1186-1214).
+                local function valuesOf(model)
+                    local ps = RepStorage:FindFirstChild('Player_Service')
+                    local vals = ps and ps:FindFirstChild('Values')
+                    return (vals and vals:FindFirstChild(model.Name)) or model
+                end
+                -- SkillStats.Get(skill)[key] (lowercase keys, SkillStats.lua:136-144).
+                local function statOf(skill, key)
+                    local SS = reqMemo('CAM.Global.Subsets.Gameplay.StatsFetch.Modules.SkillStats')
+                    if not (SS and type(SS.Get) == 'function') then return nil end
+                    local ok, st = pcall(SS.Get, skill)
+                    if ok and type(st) == 'table' then return st[key] end
+                    return nil
+                end
+                -- 'absorb' = the mob eats the hit (i-frames, Dodge charges); 'punish' = the
+                -- swing gets countered / perfect-parried. Same order as check_victim.
+                local function defenseOf(model)
+                    local vf = valuesOf(model)
+                    -- hold i-frame, server side (VisibilityHelpers.lua:18-37 on the server reads
+                    -- SHCS): a skill with the iframe stat + last_performed + a Max_Hold_Time
+                    local shs = model:FindFirstChild('SHCS')
+                    if shs and shs:IsA('StringValue') and shs.Value ~= '' and shs:GetAttribute('last_performed') ~= nil
+                        and statOf(shs.Value, 'iframe') then
+                        local PP = reqMemo('CAM.Global.PlayerProfile')
+                        local si = PP and type(PP.skill_info) == 'table' and PP.skill_info[shs.Value]
+                        if type(si) == 'table' and si.Max_Hold_Time then return 'absorb', 'i-frames' end
+                    end
+                    -- iframe / escapeiframe children, unless one names us (GetIFrame.lua:14-53)
+                    local anyI, oursI = false, false
+                    for _, c in ipairs(vf:GetChildren()) do
+                        if c.Name == 'iframe' or c.Name == 'escapeiframe' then
+                            anyI = true
+                            if c:IsA('ValueBase') and tostring(c.Value) == LP.Name then oursI = true end
+                        end
+                    end
+                    if anyI and not oursI then return 'absorb', 'i-frames' end
+                    -- NpcCounter 1 = M1s, 2 = everything (Checker.lua:935-972)
+                    local nc = model:GetAttribute('NpcCounter')
+                    if nc == 1 or nc == 2 then return 'punish', 'counter stance' end
+                    -- GetCounter.lua:10-19: a Counter StringValue (Type attr; Record ones never
+                    -- fire on M1, Checker.lua:989-1003), else the FIRST of SHC / SHCS
+                    local ctr, ct = vf:FindFirstChild('Counter'), nil
+                    if ctr and ctr:IsA('StringValue') and ctr.Value ~= '' then
+                        ct = ctr:GetAttribute('Type')
+                        if ctr:GetAttribute('Record') == true then ct = nil end
+                    else
+                        local sh = model:FindFirstChild('SHC') or model:FindFirstChild('SHCS')
+                        if sh and sh:IsA('StringValue') and sh.Value ~= '' then ct = statOf(sh.Value, 'counter') end
+                    end
+                    if ct == 1 or ct == 2 then return 'punish', 'counter' end
+                    local dg = vf:FindFirstChild('Dodge')
+                    if dg and dg:IsA('IntValue') and dg.Value > 0 then return 'absorb', 'dodge' end
+                    local blk = vf:FindFirstChild('Blocking')
+                    if blk and not vf:FindFirstChild('PierceBlock') and blk:FindFirstChild('Perfect') then return 'punish', 'perfect block' end
+                    return nil, nil
+                end
+                -- Same filter as the farm's pick(): quest mob / Only-these-mobs list / civ + boss toggles.
+                local function kindOf(model)
+                    local slot = model.Parent
+                    local name = slot and slot.Name or model.Name
+                    local civ = name:find('Civilian') ~= nil or model:GetAttribute('CivilianState') ~= nil
+                    local boss = slot ~= nil and slot:FindFirstChild('BossInfo') ~= nil
+                    return name, civ, boss
+                end
+                local function wantedModel(model)
+                    local name, civ, boss = kindOf(model)
+                    if S.questMob then
+                        return (name:lower():gsub('[^%w]', '')) == (tostring(S.questMob):lower():gsub('[^%w]', ''))
+                    end
+                    local filter = Options.SLFarmTargets and Options.SLFarmTargets.Value
+                    if type(filter) == 'table' and next(filter) ~= nil then return filter[name] == true end
+                    return not (Toggles.SLFarmSkipCiv and Toggles.SLFarmSkipCiv.Value and civ)
+                        and not (boss and Toggles.SLFarmBosses and not Toggles.SLFarmBosses.Value)
+                end
+                -- A mob a Kill Aura spot must not clip: an unwanted civilian (Skip civilians on)
+                -- or boss (Include bosses off). The farm's own spot is left as it always was.
+                local function offLimits(model)
+                    if wantedModel(model) then return false end
+                    local _, civ, boss = kindOf(model)
+                    return (civ and Toggles.SLFarmSkipCiv and Toggles.SLFarmSkipCiv.Value)
+                        or (boss and Toggles.SLFarmBosses and not Toggles.SLFarmBosses.Value) or false
+                end
+
+                -- ---- region queries: the server's own filter ------------------------------
+                local HS
+                local OPH = OverlapParams.new()
+                OPH.FilterType = Enum.RaycastFilterType.Include
+                OPH.MaxParts = 350
+                local OPT = OverlapParams.new()
+                OPT.FilterType = Enum.RaycastFilterType.Include
+                OPT.MaxParts = 64
+                local function humFolder()
+                    if HS and HS.Parent then return HS end
+                    HS = workspace:FindFirstChild('Humanoids')
+                    if HS then OPH.FilterDescendantsInstances = { HS } end
+                    return HS
+                end
+                -- Models GetModelInRegion would return: the part's direct parent is a Model
+                -- with a PrimaryPart (Utility.lua:1234-1241) and a child named Humanoid (:434).
+                local function modelsIn(cf, size, params)
+                    local out, seen = {}, {}
+                    local ok, parts = pcall(workspace.GetPartBoundsInBox, workspace, cf, size, params)
+                    if not ok or type(parts) ~= 'table' then return out end
+                    for _, p in ipairs(parts) do
+                        local m = p.Parent
+                        if m and not seen[m] and m:IsA('Model') and m.PrimaryPart ~= nil and m:FindFirstChild('Humanoid') then
+                            seen[m] = true
+                            out[#out + 1] = m
+                        end
+                    end
+                    return out
+                end
+                local function isPlayerish(m)
+                    if Players:GetPlayerFromCharacter(m) then return true end
+                    local co = m:FindFirstChild('Clone_Owner') -- a player's clone (check_victim :844-850)
+                    return co ~= nil and co:IsA('StringValue') and co.Value ~= LP.Name and Players:FindFirstChild(co.Value) ~= nil
+                end
+                local function vmin(a, b) return V3(math.min(a.X, b.X), math.min(a.Y, b.Y), math.min(a.Z, b.Z)) end
+                local function vmax(a, b) return V3(math.max(a.X, b.X), math.max(a.Y, b.Y), math.max(a.Z, b.Z)) end
+                -- Boxes built for one pose share its yaw frame: intersect (cover = false) or
+                -- cover their extents in the first box's frame, then shrink / pad each face
+                -- by the Vector3 pad.
+                local function merge(list, cover, pad)
+                    local f0 = list[1][1]
+                    local lo, hi
+                    for _, b in ipairs(list) do
+                        local c, h = f0:PointToObjectSpace(b[1].Position), b[2] / 2
+                        if not lo then
+                            lo, hi = c - h, c + h
+                        elseif cover then
+                            lo, hi = vmin(lo, c - h), vmax(hi, c + h)
+                        else
+                            lo, hi = vmax(lo, c - h), vmin(hi, c + h)
+                        end
+                    end
+                    if cover then lo, hi = lo - pad, hi + pad else lo, hi = lo + pad, hi - pad end
+                    local size = hi - lo
+                    if size.X < 0.2 or size.Y < 0.2 or size.Z < 0.2 then return nil, nil end
+                    return f0 * CFrame.new((lo + hi) / 2), size
+                end
+                -- One of OUR boxes in the identity pose (upright at the origin, facing -Z).
+                -- ext 0 with no reach bonus = the server aims along a zero vector (:396-402),
+                -- so its facing is undefined: it becomes a facing-free square (inside every
+                -- rotation of it when intersecting, around every rotation when covering).
+                local function poseBox(pp, c, e, floor, own, cover)
+                    local cf, size = S.m1BoxAt(CFrame.new(), pp, c, false, e, floor, own)
+                    if not (e <= 0 and reachU1(pp or {}, c, floor) == 0) then return { cf, size } end
+                    local zo = math.abs(pidx(pp and pp.ZOffsets, c) or 0)
+                    local hw, hd = size.X / 2, size.Z / 2
+                    local half
+                    if cover then
+                        half = math.sqrt(hw * hw + hd * hd) + zo
+                    else
+                        half = math.max(0.1, (math.min(hw, hd) - zo) / math.sqrt(2))
+                    end
+                    return { CFrame.new(0, -1 + (pidx(pp and pp.YOffsets, c) or 0), 0), V3(half * 2, size.Y, half * 2) }
+                end
+                -- Pose-relative templates, for every last_magasd the server may use (exts):
+                --  N = the hit we throw next (+ hit 7 if it is the air finisher), no Widths,
+                --      shrunk by margin (flat)                        -> the count
+                --  G = inside EVERY combo's box (a spot is held for many swings)  -> target must be in it
+                --  U = anything ANY combo (and hit 7) can touch, Widths kept, padded -> player / punisher veto
+                local function templates(pp, nextC, margin, floor, exts, air)
+                    local mx = math.clamp(tonumber(pp and pp.Max) or 5, 1, 7)
+                    local nC, gC, uC = { nextC }, {}, {}
+                    if air and nextC == mx then nC[2] = 7 end
+                    for c = 1, mx do gC[#gC + 1] = c; uC[#uC + 1] = c end
+                    if air then gC[#gC + 1] = 7 end
+                    uC[#uC + 1] = 7
+                    local nList, gList, uList = {}, {}, {}
+                    for _, e in ipairs(exts) do
+                        for _, c in ipairs(nC) do nList[#nList + 1] = poseBox(pp, c, e, floor, true, false) end
+                        for _, c in ipairs(gC) do gList[#gList + 1] = poseBox(pp, c, e, floor, true, false) end
+                        for _, c in ipairs(uC) do uList[#uList + 1] = poseBox(pp, c, e, floor, false, true) end
+                    end
+                    local shrink = V3(margin, 0.1, margin) -- mobs drift sideways; our height is exact
+                    local nL, nS = merge(nList, false, shrink)
+                    local gL, gS = merge(gList, false, shrink)
+                    local uL, uS = merge(uList, true, V3(0.75, 0.75, 0.75))
+                    return nL, nS, gL, gS, uL, uS
+                end
+                -- Score one pose: mobs its box hits (target included), or nil + why.
+                -- fatal = don't swing from here at all (player / punishing mob in reach).
+                -- alt = a Kill Aura spot (not the farm's own): also refuses off-limits mobs.
+                local function evalPose(ctx, pos, dir, needTarget, alt)
+                    local cf = CFrame.lookAt(pos, pos + dir)
+                    local veto
+                    for _, m in ipairs(modelsIn(cf * ctx.uL, ctx.uS, OPH)) do
+                        if m ~= ctx.me and m ~= ctx.target then
+                            if isPlayerish(m) then
+                                if Toggles.SLKANoPvP.Value then return nil, 'player in box', true end
+                            elseif m:GetAttribute('IsMob') then
+                                if Toggles.SLKADefense.Value then
+                                    local k, why = ctx.def(m)
+                                    if k == 'punish' then return nil, 'mob ' .. tostring(why), true end
+                                end
+                                if alt and not veto and offLimits(m) then veto = 'off-limits mob in reach' end
+                            end
+                        end
+                    end
+                    if veto then return nil, veto, false end
+                    if needTarget and #modelsIn(cf * ctx.gL, ctx.gS, OPT) == 0 then return nil, 'target out of reach', false end
+                    local n = 0
+                    if ctx.nL then
+                        for _, m in ipairs(modelsIn(cf * ctx.nL, ctx.nS, OPH)) do
+                            if m == ctx.target then
+                                n = n + 1
+                            elseif m ~= ctx.me and m:GetAttribute('IsMob') and ctx.countable(m) then
+                                n = n + 1
+                            end
+                        end
+                    end
+                    if needTarget then n = math.max(n, 1) end
+                    return n, nil, false
+                end
+
+                -- cur = the pose in use for the current target: pos/dir = a WORLD-anchored Kill
+                -- Aura spot (nil = the farm's own spot on the target's head), since = when it
+                -- was adopted (1s minimum), switchedAt = last change (the farm snaps there).
+                local cur, lastSolve, lastErr = {}, 0, -1e9
+                local punishSince, mobPunishSince, playerSince
+                S.kaAvoid = setmetatable({}, { __mode = 'k' }) -- target -> os.clock() until which the farm skips it
+                S.kaAvoidUntil = 0
+                local function solve(target, mroot, baseGoal, baseFlat)
+                    local root, me = S.root(), LP.Character
+                    if not (root and me and humFolder() and presets()) then return nil end
+                    local pp, _, floor = myPreset()
+                    local ctx = { me = me, target = target }
+                    ctx.nL, ctx.nS, ctx.gL, ctx.gS, ctx.uL, ctx.uS = templates(pp, nextCombo(pp), Options.SLKAMargin.Value, floor, extSet(root), airborne())
+                    if not ctx.uL then return nil end
+                    OPT.FilterDescendantsInstances = { target }
+                    local defC = {}
+                    ctx.def = function(m)
+                        local d = defC[m]
+                        if not d then
+                            local k, why = defenseOf(m)
+                            d = { k or false, why }
+                            defC[m] = d
+                        end
+                        return d[1] or nil, d[2]
+                    end
+                    ctx.countable = function(m)
+                        local h = m:FindFirstChildOfClass('Humanoid')
+                        if not (h and h.Health > 0) then return false end
+                        if Toggles.SLKAOnlyWanted.Value and not wantedModel(m) then return false end
+                        return ctx.def(m) == nil -- absorbers / punishers never count
+                    end
+                    local now = os.clock()
+                    local baseN, baseWhy, baseFatal = evalPose(ctx, baseGoal, baseFlat, false, false)
+                    local res = { n = baseN or 0, hold = baseFatal and baseWhy or nil }
+                    local function adopt(pos, dir, n) -- pos nil = the farm's own spot
+                        local changed
+                        if pos then
+                            changed = not (cur.pos and cur.dir) or (flat2(pos) - flat2(cur.pos)).Magnitude > 2
+                                or (cur.dir.X * dir.X + cur.dir.Z * dir.Z) < 0.9
+                        else
+                            changed = cur.pos ~= nil
+                        end
+                        if changed then cur.since, cur.switchedAt = now, now end
+                        cur.pos, cur.dir = pos, pos and dir or nil
+                        if pos then
+                            res.alt, res.pos, res.ty, res.dir, res.n, res.hold = true, pos, mroot.Position.Y, dir, n, nil
+                        end
+                        return res
+                    end
+                    if not (Toggles.SLKAMulti.Value and ctx.nL and ctx.gL) then return adopt(nil) end
+                    -- the pack (mobs worth hitting) + every mob box that could reach a spot near it
+                    local tpos = mroot.Position
+                    local tf = flat2(tpos)
+                    local hum = S.hum()
+                    local legs = (hum and hum.HipHeight or 2) + root.Size.Y / 2
+                    local tweak = Options.SLFarmTweak and Options.SLFarmTweak.Value or 0
+                    local radius = Options.SLKARadius.Value
+                    local baseDy = baseGoal.Y - tpos.Y -- never sit lower over the pack than the farm sits on the target (Manual / Model size modes)
+                    local danger = { { pos = tpos, lo = topRel(mobPreset(target)) + legs + 0.15, r2 = math.huge } }
+                    local pack = {}
+                    for _, m in ipairs(S.mobs()) do
+                        if m.model ~= target then
+                            local d = (flat2(m.root.Position) - tf).Magnitude
+                            if d <= radius + 40 then
+                                local mp = mobPreset(m.model)
+                                local r = reachOf(mp, m.root)
+                                if d <= radius + r then
+                                    danger[#danger + 1] = { pos = m.root.Position, lo = topRel(mp) + legs + 0.15, r2 = r * r }
+                                end
+                                if d <= radius and ctx.countable(m.model) then pack[#pack + 1] = { p = flat2(m.root.Position), d = d } end
+                            end
+                        end
+                    end
+                    table.sort(pack, function(a, b) return a.d < b.d end)
+                    while #pack > 4 do table.remove(pack) end
+                    -- root height at a spot: feet above every mob box that can reach it (+ tweak),
+                    -- and at least the farm's own height over the target
+                    local function heightAt(p)
+                        local y = -math.huge
+                        for _, d in ipairs(danger) do
+                            local dx, dz = d.pos.X - p.X, d.pos.Z - p.Z
+                            if dx * dx + dz * dz <= d.r2 then y = math.max(y, d.pos.Y + d.lo) end
+                        end
+                        return math.max(y + tweak, tpos.Y + baseDy)
+                    end
+                    -- the spot in use, re-checked where it is (world-anchored, not target-relative)
+                    local curPos, curN
+                    if cur.pos and cur.dir then
+                        local p = flat2(cur.pos)
+                        curPos = V3(p.X, heightAt(p), p.Z)
+                        curN = evalPose(ctx, curPos, cur.dir, true, true)
+                    end
+                    -- hysteresis: a pose is kept >= 1s unless it turned fatal / lost the target
+                    if now - (cur.since or -1e9) < 1 then
+                        if curPos and curN then return adopt(curPos, cur.dir, curN) end
+                        if not cur.pos and not baseFatal then return adopt(nil) end
+                    end
+                    -- a walking target (chasing / leashing home): no NEW spot, it would drag us
+                    -- along; keep the current one only while it still holds the target
+                    if flat2(mroot.AssemblyLinearVelocity).Magnitude > 3 then
+                        if curPos and curN and (curN >= 2 or baseFatal) then return adopt(curPos, cur.dir, curN) end
+                        return adopt(nil)
+                    end
+                    -- candidate spots: above the target, the pack centre, target-mob and mob-mob midpoints
+                    local pts, aims = { tf }, { tf }
+                    if #pack > 0 then
+                        local sum = tf
+                        for _, e in ipairs(pack) do sum = sum + e.p; aims[#aims + 1] = e.p end
+                        local cen = sum / (#pack + 1)
+                        pts[#pts + 1] = cen
+                        aims[#aims + 1] = cen
+                        for i = 1, #pack do
+                            pts[#pts + 1] = (tf + pack[i].p) / 2
+                            for j = i + 1, #pack do pts[#pts + 1] = (pack[i].p + pack[j].p) / 2 end
+                        end
+                    end
+                    -- cheap pre-score (mob roots vs the N footprint), then real queries on the best 8
+                    local half = ctx.nS / 2
+                    local bf = flat2(baseFlat)
+                    bf = bf.Magnitude > 0.05 and bf.Unit or V3(0, 0, -1)
+                    local function inXZ(bcf, p)
+                        local q = bcf:PointToObjectSpace(p)
+                        return math.abs(q.X) <= half.X + 1 and math.abs(q.Z) <= half.Z + 1
+                    end
+                    local pre = {}
+                    for _, p in ipairs(pts) do
+                        local pos = V3(p.X, heightAt(p), p.Z)
+                        local move = (pos - root.Position).Magnitude
+                        local dirs = { bf }
+                        for _, a in ipairs(aims) do
+                            local v = a - p
+                            if v.Magnitude > 1 then dirs[#dirs + 1] = v.Unit end
+                        end
+                        for _, dir in ipairs(dirs) do
+                            local bcf = CFrame.lookAt(pos, pos + dir) * ctx.nL
+                            if inXZ(bcf, tf) then
+                                local c = 1
+                                for _, e in ipairs(pack) do if inXZ(bcf, e.p) then c = c + 1 end end
+                                if c >= 2 or baseFatal then pre[#pre + 1] = { pos = pos, dir = dir, c = c, move = move } end
+                            end
+                        end
+                    end
+                    table.sort(pre, function(a, b)
+                        if a.c ~= b.c then return a.c > b.c end
+                        return a.move < b.move
+                    end)
+                    local best
+                    for i = 1, math.min(#pre, 8) do
+                        local c = pre[i]
+                        local n = evalPose(ctx, c.pos, c.dir, true, true)
+                        if n and (not best or n > best.n or (n == best.n and c.move < best.move)) then
+                            best = { pos = c.pos, dir = c.dir, n = n, move = c.move }
+                        end
+                    end
+                    -- sticky: keep the current spot unless something strictly beats it
+                    if curPos and curN and (not best or curN >= best.n) then
+                        best = { pos = curPos, dir = cur.dir, n = curN, move = 0, cur = true }
+                    end
+                    local bn = baseN or 0
+                    if best and ((best.n >= 2 and (best.n > bn or (best.cur and best.n >= bn))) or (baseFatal and best.n >= 1)) then
+                        return adopt(best.pos, best.dir, best.n)
+                    end
+                    return adopt(nil)
+                end
+                -- Called by the Mob Farm every frame with its own goal/facing (head of the
+                -- target). Solves at most 5x/s; returns goal, flat, mobs in box, hold-M1
+                -- reason (or nil), snap (true for 0.3s after the solver changed the spot).
+                function S.kaPose(target, mroot, goal, flat)
+                    if not (Toggles.SLKAMulti.Value or Toggles.SLKADefense.Value or Toggles.SLKANoPvP.Value) then
+                        cur = {}
+                        return goal, flat, 0, nil, false
+                    end
+                    local now = os.clock()
+                    if cur.target ~= target then
+                        cur = { target = target }
+                        lastSolve, punishSince, mobPunishSince, playerSince = 0, nil, nil, nil
+                    end
+                    local root = S.root()
+                    if root and (root.Position - goal).Magnitude < 45 then
+                        if now - lastSolve >= 0.2 then
+                            lastSolve = now
+                            local ok, res = pcall(solve, target, mroot, goal, flat)
+                            cur.res = (ok and type(res) == 'table') and res or nil
+                            if not ok and now - lastErr > 5 then lastErr = now; S.setText(statLbl, 'Kill Aura error: ' .. tostring(res)) end
+                        end
+                    else
+                        cur.res, cur.pos, cur.dir, cur.since = nil, nil, nil, nil
+                    end
+                    local res = cur.res
+                    local g, f, n, hold = goal, flat, 0, nil
+                    if res then
+                        n, hold = res.n or 0, res.hold
+                        if res.alt and res.pos and res.dir then
+                            -- world-anchored spot; only its height follows the target
+                            g, f = V3(res.pos.X, mroot.Position.Y + (res.pos.Y - res.ty), res.pos.Z), res.dir
+                        end
+                    end
+                    -- Caps, so a state nothing clears (NpcCounter only goes when a hit triggers
+                    -- it, Checker.lua:935-972) can never freeze the farm: a punishing neighbour
+                    -- gets 2s, then one swing takes its counter (Auto Parry / skill dodge cover the
+                    -- riposte). Players are never swung into; after 5s the farm skips this target
+                    -- for 20s (pick() and the farm loop read S.kaAvoid).
+                    if hold ~= nil and tostring(hold):sub(1, 4) == 'mob ' then
+                        mobPunishSince = mobPunishSince or now
+                        if now - mobPunishSince >= 2 then hold = nil end
+                    else
+                        mobPunishSince = nil
+                    end
+                    if hold == 'player in box' then
+                        playerSince = playerSince or now
+                        if now - playerSince >= 5 then
+                            S.kaAvoid[target] = now + 20
+                            S.kaAvoidUntil = now + 20
+                        end
+                    else
+                        playerSince = nil
+                    end
+                    if Toggles.SLKADefense.Value then
+                        local k, why = defenseOf(target)
+                        if k == 'punish' then
+                            punishSince = punishSince or now
+                            if now - punishSince < 2 then hold = hold or ('target ' .. tostring(why)) end
+                        else
+                            punishSince = nil -- i-frames / Dodge charges: keep swinging (costs nothing, burns the charges)
+                        end
+                    else
+                        punishSince = nil
+                    end
+                    return g, f, n, hold, now - (cur.switchedAt or -1e9) < 0.3
+                end
+
+                -- ---- hit check: did one swing really damage several mobs? ----------------
+                -- Ledger = <mob>.DMG.<our name>.Value, a running damage total created on the
+                -- first hit; fallback: DMG attrs LastAttacker == us and LastAttacked moved.
+                -- Looked up fresh every time (DMG can be created / re-created).
+                local hist, hIdx, lastKey = {}, 0, nil
+                local function ledger(model)
+                    local d = valuesOf(model):FindFirstChild('DMG')
+                    if not d then return 0, 0, nil end
+                    local e = d:FindFirstChild(LP.Name)
+                    local v = (e and e:IsA('ValueBase')) and tonumber(e.Value) or 0
+                    return v or 0, tonumber(d:GetAttribute('LastAttacked')) or 0, d:GetAttribute('LastAttacker')
+                end
+                local function record(pred, hit)
+                    hIdx = hIdx % 40 + 1
+                    hist[hIdx] = { pred, hit }
+                    local sw, landed, mobs, boxed = 0, 0, 0, 0
+                    for _, h in pairs(hist) do
+                        sw = sw + 1
+                        boxed = boxed + h[1]
+                        if h[2] > 0 then landed = landed + 1; mobs = mobs + h[2] end
+                    end
+                    local avg = landed > 0 and mobs / landed or 0
+                    S.kaAvg = avg
+                    S.kaStat = landed > 0 and ('  %.2f mobs/hit'):format(avg) or ''
+                    S.setText(statLbl, ('Last %d swings: %d landed, avg %.2f mobs/hit (box predicted %.2f; checked on the DMG ledger)'):format(sw, landed, avg, boxed / math.max(sw, 1)))
+                end
+                box:AddButton({ Text = 'Reset hit check', Func = function()
+                    hist, hIdx, S.kaStat, S.kaAvg = {}, 0, '', nil
+                    S.setText(statLbl, 'Hit check: waiting for farm swings')
+                end })
+                -- A new punch = ComboTrackerClient.Time changes (CU/Combat.lua:152-163; fallback
+                -- Combat_presets.Last_Punched). Watch every mob the swing could touch across a
+                -- one-swing-wide window centred on when its damage should replicate (hit time
+                -- + round trip), so back-to-back swings (~0.26s apart) are not double counted.
+                htrack(RunService.Heartbeat:Connect(function()
+                    local root = S.root()
+                    if S.farmLocked and root and lmOf(root) >= 1 then lmProven = true end
+                    local last, at = comboTracker()
+                    if at == nil or at == lastKey then return end
+                    local first = lastKey == nil
+                    lastKey = at
+                    if first or not S.farmLocked then return end
+                    if not (root and humFolder() and presets()) then return end
+                    local pp, _, floor = myPreset()
+                    local combo = math.max(1, tonumber(last) or 1)
+                    local mx = math.clamp(tonumber(pp and pp.Max) or 5, 1, 7)
+                    if combo == mx and airborne() then combo = 7 end -- the air finisher (Main_Combat_Script_Client.lua:115-117)
+                    local e = math.max(1, math.min(lmOf(root), 7))
+                    local ok, cf, size = pcall(S.m1BoxAt, root.CFrame, pp, combo, false, e, floor, true)
+                    local ok7, cf7, size7 = pcall(S.m1BoxAt, root.CFrame, pp, 7, false, math.max(e, 3), floor)
+                    if not (ok and ok7) then return end
+                    local pred = 0
+                    for _, m in ipairs(modelsIn(cf, size, OPH)) do
+                        if m ~= LP.Character and m:GetAttribute('IsMob') then pred = pred + 1 end
+                    end
+                    local watch = {}
+                    for _, m in ipairs(modelsIn(cf7, size7 + V3(4, 4, 4), OPH)) do
+                        if m ~= LP.Character and m:GetAttribute('IsMob') then watch[#watch + 1] = m end
+                    end
+                    if #watch == 0 then return end
+                    local lead = math.max(0, S.swingTiming(pp, combo, false) + S.pingSec() - 0.13)
+                    task.delay(lead, function()
+                        local before = {}
+                        for i, m in ipairs(watch) do
+                            if m.Parent then
+                                local v, la = ledger(m)
+                                before[i] = { v, la }
+                            end
+                        end
+                        task.wait(0.26)
+                        local hit = 0
+                        for i, m in ipairs(watch) do
+                            local b = before[i]
+                            if b and m.Parent then
+                                local v, la, who = ledger(m)
+                                if v > b[1] + 1e-3 or (who == LP.Name and la > b[2]) then hit = hit + 1 end
+                            end
+                        end
+                        record(pred, hit)
+                    end)
+                end))
             end)()
 
             -- ================================================================
@@ -2074,6 +3360,12 @@ if HUB_CURRENT ~= 'roguecopy' then
                 box:AddDropdown('SLQuest', { Values = labels, Default = 1, Multi = false, AllowNull = false, Text = 'Quest',
                     Tooltip = 'Auto = highest quest your level allows. Pick one to lock it (a boss pick still falls back to its mob quest while the boss is down).' })
                 box:AddToggle('SLQuestBoss', { Text = 'Do boss quests when the boss is up', Default = true })
+                box:AddDropdown('SLQRank', { Values = { 'Highest level', 'Best EXP/min' }, Default = 1, Multi = false, Text = 'Auto picks by',
+                    Tooltip = 'Highest level = the top quest you can take. Best EXP/min = your top 2 quests compete on MEASURED EXP per minute: quest reward + the kills\' own EXP, over how long that quest really took you (accept -> done + the walk back, saved in SlayersHub/quest_times.json). Each is run once to time it before anything is compared; the lower one must win by 10%.' })
+                box:AddToggle('SLQCdFarm', { Text = 'Farm through the accept cooldown', Default = true,
+                    Tooltip = 'The 30s accept cooldown counts from your last quest accept (and hunt claims share it). When it is still running as a quest finishes (a quick quest, or a hunt claimed mid-quest), keep farming the quest you just finished instead of standing at the NPC, and leave so you arrive as it ends (distance / travel speed + 1s). Quests over 30s long finish with no cooldown left, so it rarely kicks in otherwise.' })
+                box:AddToggle('SLQSpawnWait', { Text = 'Wait at the next respawn', Default = true,
+                    Tooltip = 'At the camp with every quest mob dead: shows the respawn countdown (slot DespawnedAt + SpawnTime) and waits over the slot that comes back first, never more than 100 studs from the camp. Needs "Travel to the camp" to move you.' })
                 box:AddToggle('SLQuestAbandon', { Text = 'Drop a boss quest if the boss dies', Default = true,
                     Tooltip = 'Someone else killed "your" boss: abandon the quest (X on the quest card) and farm the mob quest instead of idling through the respawn.' })
                 box:AddToggle('SLQuestTravel', { Text = 'Travel to the camp', Default = true,
@@ -2134,13 +3426,107 @@ if HUB_CURRENT ~= 'roguecopy' then
                     if goal and per and per > 0 then return math.floor(goal / per) end
                     return nil
                 end
+                -- Quests.CanAddQuest(LP, key, skipCD) decoded (Quests.lua:226-286):
+                --   true            -> can accept now
+                --   nil             -> requirements fail (Level / Race / Items: ItemRequirements.Passes)
+                --   false, 2        -> one-time quest already done
+                --   false, 1        -> already holding it
+                --   false, false, q -> the category's single slot is taken by quest q
+                --   false, true, q  -> 30s accept cooldown (only checked when skipCD ~= true)
+                -- Only trusted when the key is registered in Quests.Holder (an unknown key
+                -- "passes" as a Combat quest). Returns nil when it can't be checked here.
+                local function canAdd(key, skipCD)
+                    local m = QM()
+                    if not (m and type(m.CanAddQuest) == 'function' and type(m.Holder) == 'table' and m.Holder[key] ~= nil) then
+                        return nil, 'quest not registered on this client', 'unknown'
+                    end
+                    local ok, r, why, held = pcall(m.CanAddQuest, LP, key, skipCD == true)
+                    if not ok then return nil, 'CanAddQuest failed', 'unknown' end
+                    if r == true then return true, nil, 'ok' end
+                    if r == nil then return false, 'requirements not met (level / race / items)', 'req' end
+                    if why == 2 then return false, 'one-time quest already done', 'done' end
+                    if why == 1 then return false, 'already holding it', 'held' end
+                    if why == false then
+                        local okC, cat = pcall(m.GetQuestCategory, key)
+                        return false, ('another %s quest is active: %s'):format(okC and tostring(cat) or 'Combat', tostring(held)), 'full'
+                    end
+                    return false, 'accept cooldown', 'cd'
+                end
+                -- ---- EXP/min ranking (Auto, "Best EXP/min") -------------------------
+                -- EXP = Quests.Holder[key].Rewards.Exp + the kills' own EXP (each task's Max
+                -- x LiveConfig NpcDataTable[<task Code>].Rewards.Exp; Code = the NPC code
+                -- Quests.QuestTask stores). Time = that quest's MEASURED accept -> completion
+                -- time (rolling average, kept in SlayersHub/quest_times.json) + the camp ->
+                -- NPC walk back, never under Quests.QuestCD. No guessed times: an unmeasured
+                -- quest has no rate and choose() runs it once before comparing.
+                local TIMES_FILE = 'SlayersHub/quest_times.json'
+                local learned, startedAt = {}, {}
+                pcall(function()
+                    if isfile and readfile and isfile(TIMES_FILE) then
+                        local t = HttpService:JSONDecode(readfile(TIMES_FILE))
+                        if type(t) == 'table' then
+                            for k, v in pairs(t) do if type(k) == 'string' and type(v) == 'number' and v > 0 then learned[k] = v end end
+                        end
+                    end
+                end)
+                local function learnDuration(q)
+                    local t0 = startedAt[q.key]
+                    if not t0 then return end
+                    local d = os.clock() - t0
+                    if d < 5 or d > 3600 then return end
+                    learned[q.key] = learned[q.key] and (learned[q.key] * 0.6 + d * 0.4) or d
+                    if writefile then
+                        pcall(function()
+                            if makefolder and isfolder and not isfolder('SlayersHub') then makefolder('SlayersHub') end
+                            writefile(TIMES_FILE, HttpService:JSONEncode(learned))
+                        end)
+                    end
+                end
+                local npcTbl, npcAt = nil, -1e9
+                local function npcExp(code) -- EXP one kill of this NPC code pays (LiveConfig, re-read every 60s)
+                    if os.clock() - npcAt > 60 then
+                        npcAt = os.clock()
+                        local LC = S.req('CAM.Global.LiveConfig')
+                        local ok, t = false, nil
+                        if LC and type(LC.get) == 'function' then ok, t = pcall(LC.get, 'NpcDataTable') end
+                        npcTbl = (ok and type(t) == 'table') and t or nil
+                    end
+                    local d = npcTbl and code and npcTbl[code]
+                    return (type(d) == 'table' and type(d.Rewards) == 'table' and tonumber(d.Rewards.Exp)) or 0
+                end
+                local function questExp(q) -- quest reward + the kill EXP of its tasks
+                    local m = QM()
+                    local def = m and type(m.Holder) == 'table' and m.Holder[q.key]
+                    if type(def) ~= 'table' then return math.max(q.lv, 1) * 18 end
+                    local xp = type(def.Rewards) == 'table' and tonumber(def.Rewards.Exp) or 0
+                    local qi = def.QuestInstance
+                    local tasks = typeof(qi) == 'Instance' and qi:FindFirstChild('Tasks')
+                    for _, t in ipairs(tasks and tasks:GetChildren() or {}) do
+                        xp = xp + (tonumber(S.val(t, 'Max')) or 0) * npcExp(S.val(t, 'Code'))
+                    end
+                    return xp
+                end
+                local function questRate(q) -- measured EXP per minute; nil until the quest has been timed
+                    local secs = learned[q.key]
+                    if not secs then return nil end
+                    local m = QM()
+                    local back = (q.camp - q.at).Magnitude / math.max(Options.SLQuestSpeed.Value, 1)
+                    return questExp(q) / math.max(secs + back, (m and tonumber(m.QuestCD)) or 30) * 60
+                end
                 local function eligible(q)
-                    local lv = myLevel()
-                    if lv then return lv >= q.lv end
-                    local m = QM() -- fallback: the game's own check (nil = requirements fail)
-                    if not (m and m.CanAddQuest) then return q.lv == 0 end
-                    local ok, r = pcall(m.CanAddQuest, LP, q.key, true)
-                    return ok and r ~= nil
+                    -- The game's own gate: Quests.CanAddQuest(LP, key, skipCD = true). nil = level /
+                    -- Race / item requirements fail (Jugg, Goro, Tomoi want Slayer|Hybrid; Mokuro,
+                    -- Delroy Demon|Hybrid), false,2 = one-time quest done. The cooldown is skipped
+                    -- here because it only delays an accept (the Book of Guidance filters with the
+                    -- cooldown-inclusive call, RecommendedQuest.lua:97). Already holding it / the
+                    -- Combat slot being taken still count (tick() reports those).
+                    local can, _, kind = canAdd(q.key, true)
+                    if can == nil then -- not verifiable on this client: the old level-only check
+                        local lv = myLevel()
+                        if lv == nil then return q.lv == 0 end
+                        return lv >= q.lv
+                    end
+                    return can == true or kind == 'held' or kind == 'full'
                 end
                 local function isNight()
                     local DN = S.req('CAM.Global.DayAndNightHandler')
@@ -2188,10 +3574,32 @@ if HUB_CURRENT ~= 'roguecopy' then
                     local sel = Options.SLQuest.Value
                     if sel and sel ~= AUTO and byLabel[sel] then return resolve(byLabel[sel]) end
                     local night = isNight()
-                    for i = #QUESTS, 1, -1 do -- highest level first
-                        local q = QUESTS[i]
-                        if eligible(q) and not (q.night and night == false) then return resolve(q) end
+                    if Options.SLQRank.Value ~= 'Best EXP/min' then
+                        for i = #QUESTS, 1, -1 do -- highest level first
+                            local q = QUESTS[i]
+                            if eligible(q) and not (q.night and night == false) then return resolve(q) end
+                        end
+                        return nil
                     end
+                    -- Best EXP/min: the top 2 eligible quests (by level) compete. Each is run and
+                    -- timed once before any comparison (never a guess), then the lower one
+                    -- must beat the higher one by 10% to be picked.
+                    local cands = {}
+                    for i = #QUESTS, 1, -1 do
+                        local q = QUESTS[i]
+                        if eligible(q) and not (q.night and night == false) then
+                            local r, why = resolve(q)
+                            if not (cands[1] and cands[1].q == r) then cands[#cands + 1] = { q = r, why = why } end
+                            if #cands == 2 then break end
+                        end
+                    end
+                    for _, c in ipairs(cands) do
+                        if not learned[c.q.key] then return c.q, c.why end -- time it once first
+                    end
+                    local best = cands[1]
+                    local r1, r2 = best and questRate(best.q), cands[2] and questRate(cands[2].q)
+                    if r1 and r2 and r2 > r1 * 1.1 then best = cands[2] end
+                    if best then return best.q, best.why end
                     return nil
                 end
                 -- Seconds until the server's 30s accept cooldown clears. Same maths
@@ -2206,6 +3614,123 @@ if HUB_CURRENT ~= 'roguecopy' then
                     return math.max(0, cd - (now - lt) + 0.25) -- +0.25s slack for the server's clock
                 end
                 local function running() return Toggles.SLAutoQuest.Value and not S.dead end
+                -- ---- spawn-aware waiting ---------------------------------------------
+                -- Quest-mob slots = workspace.Humanoids.Regions.<region>.ActiveNpcs.<def.Name>
+                -- folders (Regions.lua PrepareRegion; Quantity = that many folders). A dead
+                -- slot carries DespawnedAt (GetServerTimeNow epoch, not cleared on respawn)
+                -- and returns SpawnTime later: the BossInfo attribute for bosses (the boss
+                -- bar's own countdown, BossUI.lua), else the region def's
+                -- SendOver.Spawning.SpawnTime (require(ReplicatedStorage.Regions).Regions).
+                local afterQ -- the quest we just finished (farmed through the accept cooldown)
+                local ourGlide, hoverAt, hoverT = false, nil, 0
+                local lastSeen = setmetatable({}, { __mode = 'k' }) -- slot folder -> where its mob last stood
+                local spawnDefs = {}
+                local function spawningOf(slot) -- that slot's SendOver.Spawning table (cached)
+                    local region = slot.Parent and slot.Parent.Parent
+                    if not region then return nil end
+                    local key = region.Name .. '/' .. slot.Name
+                    if spawnDefs[key] == nil then
+                        local R = S.req('Regions')
+                        if not R then return nil end -- not loaded yet: try again next time
+                        spawnDefs[key] = false
+                        local reg = type(R.Regions) == 'table' and R.Regions[region.Name]
+                        if type(reg) == 'table' and type(reg.Npcs) == 'table' then
+                            for _, def in ipairs(reg.Npcs) do
+                                if type(def) == 'table' and def.Name == slot.Name and type(def.SendOver) == 'table'
+                                    and type(def.SendOver.Spawning) == 'table' then
+                                    spawnDefs[key] = def.SendOver.Spawning
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    return spawnDefs[key] or nil
+                end
+                local function asPos(v)
+                    if typeof(v) == 'Vector3' then return v end
+                    if typeof(v) == 'CFrame' then return v.Position end
+                    return nil
+                end
+                -- Seconds until a dead slot respawns (<= 0 = due) + where it will stand.
+                local function slotEta(slot, now)
+                    local bi = slot:FindFirstChild('BossInfo') -- the BossTag config (BossUI.lua reads it the same way)
+                    if not bi then for _, c in ipairs(slot:GetChildren()) do if CS:HasTag(c, 'BossTag') then bi = c; break end end end
+                    local sp = spawningOf(slot)
+                    local st = (bi and tonumber(bi:GetAttribute('SpawnTime'))) or (sp and tonumber(sp.SpawnTime))
+                    local desp = tonumber(slot:GetAttribute('DespawnedAt'))
+                    if not (st and desp) then return nil end
+                    local pos = lastSeen[slot] or (bi and asPos(bi:GetAttribute('Center')))
+                    if not pos and sp then
+                        local locs = type(sp.Locations) == 'table' and sp.Locations or {}
+                        pos = (#locs == 1 and asPos(locs[1])) or asPos(sp.Center) or asPos(locs[1])
+                    end
+                    return desp + st - now, pos
+                end
+                local function inCamp(p, camp) -- stay within 100 studs (flat) of the camp
+                    local d = Vector3.new(p.X - camp.X, 0, p.Z - camp.Z)
+                    if d.Magnitude <= 100 then return p end
+                    local c = camp + d.Unit * 100
+                    return Vector3.new(c.X, p.Y, c.Z)
+                end
+                -- Nothing to hit at the camp: wait over the quest-mob slot that comes back
+                -- first (or walk toward a loaded one the farm's search range misses).
+                -- Returns a status note ('next spawn in 12s', ...) or nil.
+                local function spawnWait(q, camp, move)
+                    local hs = workspace:FindFirstChild('Humanoids')
+                    local regs = hs and hs:FindFirstChild('Regions')
+                    if not (regs and camp) then return nil end
+                    local want, now, root = norm(q.mob), workspace:GetServerTimeNow(), S.root()
+                    local livePos, liveD, eta, etaPos, dead, total = nil, math.huge, math.huge, nil, 0, 0
+                    for _, region in ipairs(regs:GetChildren()) do
+                        local act = region:FindFirstChild('ActiveNpcs')
+                        for _, slot in ipairs(act and act:GetChildren() or {}) do
+                            if norm(slot.Name) == want then
+                                total = total + 1
+                                local live
+                                for _, m in ipairs(slot:GetChildren()) do
+                                    local h = m:IsA('Model') and m:FindFirstChildOfClass('Humanoid')
+                                    local r = h and m:FindFirstChild('HumanoidRootPart')
+                                    if r and h.Health > 0 then live = r.Position end
+                                end
+                                if live then
+                                    lastSeen[slot] = live
+                                    local d = root and (live - root.Position).Magnitude or 0
+                                    if d < liveD then livePos, liveD = live, d end
+                                else
+                                    dead = dead + 1
+                                    local e, p = slotEta(slot, now)
+                                    -- long past due with no model = it's up but not loaded / walked
+                                    -- off (DespawnedAt is never cleared): nothing to wait for
+                                    if e and e > -5 and e < eta then eta, etaPos = (e > 0 and e or 0), p end
+                                end
+                            end
+                        end
+                    end
+                    if total == 0 then return nil end
+                    local goal, note
+                    if livePos then
+                        -- only walk over if it is really past the farm's search range
+                        goal = liveD > Options.SLFarmRange.Value * 0.9 and livePos or nil
+                        note = ('%s loaded %.0f studs away'):format(q.mob, liveD)
+                    elseif eta < math.huge then
+                        goal = etaPos
+                        note = eta > 0.5 and ('next spawn in %ds'):format(math.ceil(eta)) or 'spawn due'
+                    else
+                        return ('%d/%d dead, respawn time unknown'):format(dead, total)
+                    end
+                    if move and goal and root then
+                        goal = inCamp(goal, camp)
+                        local hover = goal + Vector3.new(0, 6, 0)
+                        -- the farm's own "return to farm spot" now agrees with where we wait
+                        S.farmLastPos, S.farmLastMob = goal, S.questMob
+                        if (root.Position - hover).Magnitude > 10
+                            and (not hoverAt or (hoverAt - hover).Magnitude > 8 or os.clock() - hoverT > 5) then
+                            hoverAt, hoverT, ourGlide = hover, os.clock(), true
+                            S.glideTo(hover, Options.SLQuestSpeed.Value)
+                        end
+                    end
+                    return note
+                end
                 local function accept(q, why)
                     S.farmPaused = true
                     S.setText(status, 'Going to ' .. q.npc .. (why and ('  (' .. why .. ')') or ''))
@@ -2221,12 +3746,14 @@ if HUB_CURRENT ~= 'roguecopy' then
                         left = cooldownLeft()
                     end
                     if not running() then return false, 'stopped' end
-                    -- another Combat quest we don't know blocks us (1 at a time)
-                    local m = QM()
-                    if m and m.CanAddQuest then
-                        local ok, can, _, other = pcall(m.CanAddQuest, LP, q.key, true)
-                        if ok and can == false and other then return false, 'another Combat quest is active: ' .. tostring(other) end
+                    -- The game's own accept gate, cooldown included (what the NPC dialogue
+                    -- checks): anything but true = the server refuses, so don't send AddQuest.
+                    local can, cwhy, kind = canAdd(q.key, false)
+                    local tc = os.clock()
+                    while can == false and kind == 'cd' and os.clock() - tc < 3 and running() do
+                        task.wait(0.2); can, cwhy, kind = canAdd(q.key, false) -- cooldown clock-edge slack
                     end
+                    if can == false then return false, cwhy end
                     -- open the NPC's dialogue prompt first (the legit path), then accept
                     local pp
                     local t1 = os.clock()
@@ -2258,7 +3785,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                     if not Toggles.SLAutoQuest.Value then return end
                     local cur, entry = activeQuest()
                     if cur then
-                        lastActive = cur
+                        lastActive, S.questAcceptPending = cur, false
                         S.questMob = cur.mob
                         local camp, note = cur.camp, ''
                         if cur.boss then
@@ -2294,6 +3821,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                             end
                             return
                         end
+                        if S.huntMob then progAt = os.clock() end -- fighting a claimed hunt's boss: not stuck
                         local stall = Options.SLQuestStall.Value
                         if stall > 0 and os.clock() - progAt > stall and os.clock() - lastDrop > 10 then
                             lastDrop = os.clock(); dropped = true; progAt = os.clock()
@@ -2301,26 +3829,73 @@ if HUB_CURRENT ~= 'roguecopy' then
                             S.setText(status, ('No progress for %ds - dropping %s to re-grab'):format(stall, cur.mob))
                             return
                         end
-                        S.setText(status, ('Active: %s  %s%s  (idle %ds)'):format(cur.mob, prog, note, math.floor(os.clock() - progAt)))
-                        -- no quest mob loaded near us: head to its camp (every 10s at most)
-                        if Toggles.SLQuestTravel.Value and not S.farmHasTarget and not near(camp, 120) and os.clock() - lastTravel > 10 then
-                            lastTravel = os.clock()
+                        if ourGlide and S.farmHasTarget then ourGlide, hoverAt = false, nil; S.stopGlide() end -- the farm drives now
+                        local sw
+                        if not S.farmHasTarget and Toggles.SLQSpawnWait.Value and near(camp, 150) then
+                            -- at the camp with nothing to hit: respawn countdown + wait over the next slot
+                            sw = spawnWait(cur, camp, Toggles.SLQuestTravel.Value)
+                        elseif Toggles.SLQuestTravel.Value and not S.farmHasTarget and not near(camp, 120) and os.clock() - lastTravel > 10 then
+                            -- no quest mob loaded near us: head to its camp (every 10s at most)
+                            lastTravel, ourGlide = os.clock(), true
                             S.glideTo(camp + Vector3.new(0, 5, 0), Options.SLQuestSpeed.Value)
                         end
+                        S.setText(status, ('Active: %s  %s%s  (idle %ds)%s'):format(cur.mob, prog, note,
+                            math.floor(os.clock() - progAt), sw and ('  - ' .. sw) or ''))
                         return
                     end
                     if lastActive then -- it vanished = completed (unless we dropped it)
-                        if not dropped then done = done + 1 end
+                        if not dropped then
+                            done = done + 1
+                            learnDuration(lastActive)
+                            -- farm this camp through a still-running accept cooldown (a finished
+                            -- boss quest's boss is dead: its camp's mob quest instead)
+                            afterQ = (lastActive.boss and lastActive.alt) or lastActive
+                        end
+                        startedAt[lastActive.key] = nil
                         lastActive, dropped = nil, false
                     end
                     local q, why = choose()
-                    if not q then S.questMob = nil; S.setText(status, 'No quest available for your level'); return end
+                    if not q then S.questMob, S.questAcceptPending = nil, false; S.setText(status, 'No quest available for your level'); return end
+                    if ourGlide and S.farmHasTarget then ourGlide, hoverAt = false, nil; S.stopGlide() end
+                    -- No NPC trip can fix these: the Combat slot is held by a quest this list
+                    -- doesn't know, or the picked quest fails its requirements (race / level /
+                    -- items) or is a one-time quest already done. Keep farming meanwhile.
+                    local _, blockWhy, kind = canAdd(q.key, true)
+                    if kind == 'full' or kind == 'req' or kind == 'done' then
+                        S.questMob, S.questAcceptPending = (afterQ or q).mob, false
+                        S.setText(status, kind == 'full' and (blockWhy .. ' - finish or abandon it') or (q.l .. ': ' .. blockWhy))
+                        return
+                    end
+                    S.questAcceptPending = true -- an AddQuest is coming: Boss Hunts holds its auto-claim
+                    -- The 30s accept cooldown (Quests.QuestCD, shared by every category) counts
+                    -- from the last accept. If it still runs as a quest finishes (a quick quest,
+                    -- a hunt claimed mid-quest), keep farming the quest we just finished and
+                    -- leave for the NPC only when the cooldown ends about as we arrive.
+                    local left, r0 = cooldownLeft(), S.root()
+                    local trip = r0 and (r0.Position - q.at).Magnitude / math.max(Options.SLQuestSpeed.Value, 1) or 0
+                    if Toggles.SLQCdFarm.Value and left > trip + 1 and (afterQ or S.farmHasTarget) then
+                        local fq = afterQ or q
+                        S.questMob = fq.mob
+                        local sw
+                        if not S.farmHasTarget and Toggles.SLQSpawnWait.Value and near(fq.camp, 150) then
+                            sw = spawnWait(fq, fq.camp, Toggles.SLQuestTravel.Value)
+                        elseif Toggles.SLQuestTravel.Value and not S.farmHasTarget and not near(fq.camp, 120) and os.clock() - lastTravel > 10 then
+                            -- e.g. a finished boss quest: its mob camp can be ~400 studs from the boss
+                            lastTravel, ourGlide = os.clock(), true
+                            S.glideTo(fq.camp + Vector3.new(0, 5, 0), Options.SLQuestSpeed.Value)
+                        end
+                        S.setText(status, ('Cooldown %.0fs - farming %s%s, then %s'):format(left, fq.mob,
+                            sw and ('  (' .. sw .. ')') or '', q.l))
+                        return
+                    end
                     S.questMob = q.mob
                     if os.clock() < nextTry then return end
                     local ok, res, err = pcall(accept, q, why)
                     S.farmPaused = false
                     if ok and res then
-                        S.setText(status, 'Accepted: ' .. q.l)
+                        startedAt[q.key], afterQ = os.clock(), nil
+                        local rate = questRate(q)
+                        S.setText(status, 'Accepted: ' .. q.l .. (rate and ('  (~%.0f EXP/min measured)'):format(rate) or '  (timing this run)'))
                         nextTry = os.clock() + 2
                     else
                         S.setText(status, ('Not accepted (%s) - retrying in 5s'):format(tostring(ok and err or res)))
@@ -2337,6 +3912,81 @@ if HUB_CURRENT ~= 'roguecopy' then
                 Toggles.SLAutoQuest:OnChanged(function()
                     if not Toggles.SLAutoQuest.Value then
                         S.questMob = nil; S.farmPaused = false; S.stopGlide(); S.setText(status, 'Idle')
+                        afterQ, hoverAt, ourGlide, S.questAcceptPending = nil, nil, false, nil
+                        table.clear(startedAt) -- time spent with Auto off is not quest time
+                    end
+                end)
+            end)()
+
+            -- ================================================================
+            -- EXP METER: EXP/hour + levels/hour over a rolling 5-minute window
+            -- ================================================================
+            -- Data.slots.SlotN.Exp: Current = progress inside the level, Goal = that
+            -- level's cost = level x gameSettings.expPerLevel (ItemRequirements reads
+            -- level = Goal / expPerLevel; the admin "Give Level" command costs level k
+            -- at k x expPerLevel). So lifetime EXP = per*L*(L-1)/2 + Current and level-ups
+            -- never break the maths. Rates are RAW EXP - the numbers quest rewards and
+            -- hunt cards use. The HUD prints EXP divided by Multipliers.LevelCostFactor
+            -- (HudBottomLeft/EXP.lua; 3 below Lv45, 2.2 at Lv55-125): shown in brackets.
+            ;(function()
+                local box = Tabs.Farm:AddLeftGroupbox('EXP Meter')
+                local lbl = box:AddLabel('Measuring...', true)
+                local WINDOW = 300
+                local samples, slotRef, sess = {}, nil, nil
+                box:AddButton({ Text = 'Reset meter', Func = function()
+                    samples, sess = {}, nil
+                    S.setText(lbl, 'Measuring...')
+                end })
+                local function snap()
+                    local slot = S.data()
+                    local cur, goal = tonumber(S.val(slot, 'Exp', 'Current')), tonumber(S.val(slot, 'Exp', 'Goal'))
+                    local gs = S.req('CAM.Global.gameSettings')
+                    local per = gs and tonumber(gs.expPerLevel)
+                    if not (slot and cur and goal and goal > 0 and per and per > 0) then return nil end
+                    local lv = math.floor(goal / per + 1e-6)
+                    return { t = os.clock(), slot = slot, lv = lv, cur = cur, goal = goal,
+                        total = per * lv * (lv - 1) / 2 + cur, frac = lv + cur / goal }
+                end
+                local function hudDiv(lv) -- the HUD's EXP divisor at this level
+                    local M = S.req('CAM.Global.Multipliers')
+                    if M and type(M.LevelCostFactor) == 'function' then
+                        local ok, f = pcall(M.LevelCostFactor, lv)
+                        if ok and type(f) == 'number' and f > 0 then return f end
+                    end
+                    return 1
+                end
+                local function num(n)
+                    local a = math.abs(n)
+                    if a >= 1e6 then return ('%.2fM'):format(n / 1e6) end
+                    if a >= 1e4 then return ('%.1fk'):format(n / 1e3) end
+                    return ('%d'):format(math.floor(n + 0.5))
+                end
+                local function update()
+                    local s = snap()
+                    if not s then return end
+                    local last = samples[#samples]
+                    if s.slot ~= slotRef or (last and s.total < last.total) then -- slot swap / data reset: start over
+                        samples, sess, slotRef = {}, nil, s.slot
+                    end
+                    samples[#samples + 1] = s
+                    sess = sess or s
+                    while #samples > 2 and s.t - samples[1].t > WINDOW do table.remove(samples, 1) end
+                    local a = samples[1]
+                    local dt = s.t - a.t
+                    if dt < 20 then S.setText(lbl, ('Measuring... %ds'):format(math.floor(dt))); return end
+                    local f = hudDiv(s.lv)
+                    local rawH = (s.total - a.total) / dt * 3600
+                    local lvH = (s.frac - a.frac) / dt * 3600
+                    local toNext = rawH > 0 and (s.goal - s.cur) / rawH * 3600 or nil
+                    local gained = s.total - sess.total
+                    S.setText(lbl, ('EXP/h: %s  (HUD %s)   Levels/h: %.2f\nNext level in %s  (last %s)\nSession: +%s EXP (HUD %s), +%.2f lv in %s'):format(
+                        num(rawH), num(rawH / f), lvH, toNext and S.fmt(toNext) or '-', S.fmt(dt),
+                        num(gained), num(gained / f), s.frac - sess.frac, S.fmt(s.t - sess.t)))
+                end
+                task.spawn(function()
+                    while not S.dead do
+                        task.wait(1)
+                        pcall(update)
                     end
                 end)
             end)()
@@ -2525,6 +4175,851 @@ if HUB_CURRENT ~= 'roguecopy' then
                     end
                 end))
             end)()
+            -- ================================================================
+            -- KILL AURA - SKILL AURA: auto-cast YOUR equipped skills at packs
+            -- ================================================================
+            -- Skills are the AoE lever: a skill tick is Utility.CreateHitbox
+            -- (RS/CAM/Global/Utility.lua:920) at our server-side root.CFrame *
+            -- Config.<X>_HITBOX_OFFSET, size Config.<X>_HITBOX_SIZE (e.g. Flame
+            -- TigerServer.lua:115) and hits EVERY model in that box - mobs AND players
+            -- (check_victim only spares Safezone / Lair / minigame / party, Checker.lua
+            -- :856-891) - while M1 is server-gated to ~1.86 hits/s.
+            -- Casts go ONLY through the HUD's own slot keys: InputHandler 'Skills_1st'..
+            -- 'Skills_10th' -> HUD Skills.lua:270-360 tryHold(slot) -> Skill_Controller
+            -- .Attempt_Hold(<the HUD's cached slot name>) -> Can_Skill + Checker.check ->
+            -- 'server_skill_controller_signaler'. We never send a skill name: one outside
+            -- the loadout = Skills_Module.SourceCheck -> BanActions.Tier1 (Skills_Module
+            -- .lua:291-294), and the client Can_Skill does NOT stop it (v29 is reassigned
+            -- at :303), so before every press the fresh Skills_Provider.get_current_keys()
+            -- must equal the list the HUD last received (Keys_Changed; deferred while SHC
+            -- is busy, Skills_Provider.lua:74-112). Slot 1 is Blocking on every weapon /
+            -- power (Breathings/*.lua Skills[1]) - never cast.
+            -- What a press FIRES depends on how long the key is held for some skills
+            -- (HOLD_DURATION / TAP_THRESHOLD / MIN_HOLD_DUR ...): those are cast only when
+            -- listed in MODE below (verified branch, hold time, boxes, hit times); every
+            -- other branching skill is listed as NOT CAST.
+            -- PvP: no cast while another player / player clone is within reach of ANY
+            -- box the skill has (all branches, grabs, far boxes) + the pad; dash /
+            -- projectile skills (and skills without box data) need 175 studs clear.
+            -- The farm reads S.kaAim (face) and S.kaDrop inside S.kaDropWins (sink, only
+            -- around hit instants, only for cancel_bypass skills) until S.kaAimUntil; the
+            -- Skill Aim Assist mousepos hook returns S.kaAim for that window; S.kaCasting
+            -- = our slot key is held (Auto Parry stays off it).
+            ;(function()
+                local SP    = S.req('CAM.Client.Controllers.Skills_Provider')
+                local CK    = S.req('CAM.Global.Checker')
+                local PP    = S.req('CAM.Global.PlayerProfile')
+                local CPm   = S.req('CAM.Global.Combat_presets')
+                local PSR   = S.req('CAM.Global.PlayerStatResolver')
+                local STATS = S.req('CAM.Global.SkillService.Stats')
+                local SSA   = S.req('CAM.Global.Subsets.Gameplay.Skill_Switch_Adder')
+                local SFM   = S.req('CAM.Global.Subsets.Gameplay.StatsFetch')
+                local MCD   = S.req('CAM.Global.Subsets.Gameplay.manage_cd')
+                local SLOT_KEYS = { 'Skills_1st', 'Skills_2nd', 'Skills_3rd', 'Skills_4th', 'Skills_5th',
+                    'Skills_6th', 'Skills_7th', 'Skills_8th', 'Skills_9th', 'Skills_10th' } -- HUD Skills.lua:23-32
+                local NEVER = { Blocking = true }
+                local BOSS_W, MOVER_GUARD = 3, 175
+                -- Verified hold-time branches (server scripts under RS/Skills/<style>/<skill>):
+                --  Flame Tiger: held past HOLD_DURATION 0.3 the slash chain runs off the
+                --   server root while the key stays down (Flame TigerServer.lua:33-194; each
+                --   step re-checks Id, which the controller renews on UnHold, cf. client
+                --   Skill_Controller.lua:352): SLASH 20x12x20 at 0.38 / 1.58 / 1.925 / 2.585,
+                --   IMPACT 35x20x35 at 3.755. Released under 0.3 = TAP branch instead (:195-
+                --   515): dash + TigerHead projectile that grabs any humanoid within 162 studs,
+                --   BITE/DIVE boxes 63.5/80 studs out. So: hold 4.05s, never release < 0.45s.
+                --   UnHold adds pause_gameplay + NR for RELEASE_LOCK_DURATION 2 (Flame Tiger.lua:146-147).
+                --  Whirl Pool: released < 0.3 = one TAP box 22x25x22 at root*(0,7.5,0) on
+                --   UnHold (Whirl PoolServer.lua:97-160); held = Basin dash 65 studs/s.
+                --  Stone Wall: released < 0.3 = WALL at release+0.21 (root*(0,0,-10)), BREAK
+                --   at +0.82 in the WALL frame (v6 * BREAK_HITBOX_OFFSET, Stone WallServer.lua
+                --   :199-299); held = single-target GRAB (:432).
+                --  Arrow Eruption: released < MIN_HOLD_DUR 0.35 = cancelled; else HITBOX_ONE
+                --   at release, HITBOX_TWO +1.5 (Arrow EruptionServer.lua:47-130). The HUD
+                --   auto-releases at Max_Hold 0.4 (Arrow.lua:6, Skill_Controller.lua:583).
+                --  Not modelled (listed NOT CAST): Water Wheel (tap = 60 studs/s dash with a
+                --   catch part), Flashing Willow (boxes sit at the aim point and it pulls you
+                --   there), Upper Smash, Quick Draw, Storm Rush, Obi Barrage / Charge, Tamari,
+                --   Barren Hanging Garden - anything with a hold-time branch key.
+                local MODE = {
+                    ['Flame Tiger'] = { hold = 4.05, keep = 0.45, lock = 2, rel = 'press',
+                        keys = { SLASH_HITBOX_SIZE = true, IMPACT_HITBOX_SIZE = true },
+                        hits = { 0.38, 1.58, 1.925, 2.585, 3.755 } },
+                    ['Whirl Pool'] = { hold = 0.08, tap = true, lock = 2, rel = 'release',
+                        keys = { TAP_HITBOX_SIZE = true }, hits = { 0 } },
+                    ['Stone Wall'] = { hold = 0.08, tap = true, lock = 2, rel = 'release',
+                        keys = { WALL_HITBOX_SIZE = true, BREAK_HITBOX_SIZE = true },
+                        offs = { BREAK_HITBOX_SIZE = { 'WALL_HITBOX_OFFSET', 'BREAK_HITBOX_OFFSET' } },
+                        hits = { 0.21, 0.82 } },
+                    ['Arrow Eruption'] = { hold = 0.5, lock = 2.64, rel = 'release',
+                        keys = { HITBOX_ONE_SIZE = true, HITBOX_TWO_SIZE = true }, hits = { 0, 1.5 } },
+                }
+                -- Config keys that mean: the hold time picks a different attack
+                local BRANCH = { HOLD_DURATION = true, TAP_THRESHOLD = true, HOLD_THRESHOLD = true,
+                    MIN_HOLD_DUR = true, BARRAGE_MIN_HOLD = true, CLOSE_HOLD_DURATION = true }
+                -- Config keys of dashes / projectiles / summons / teleports: effects that
+                -- travel away from our root, so the PvP guard needs MOVER_GUARD studs clear
+                local MOVER_KEYS = { 'DASH', 'PROJECTILE', 'TRAVEL', 'TELEPORT', 'TORNADO', 'BEAM', 'ORB_', 'PETAL',
+                    'BEAD', 'GLIDE', 'FLIGHT', 'LEASH', 'SUMMON', 'METEOR', 'GUST', 'CATCH', 'DISTANCE', 'AIM_RANGE',
+                    'DEPLOY_RANGE', 'TARGET_RANGE', 'MAX_RANGE', 'ROCKUP', 'SHORT_RANGE', 'HEAD_SPEED', 'THROW_SPEED',
+                    'RISE_SPEED', 'SLAM_SPEED', 'BURST_SPEED', 'DRIVE_SPEED', 'RELEASE_SPEED', 'DRAG_SPEED', 'SPAWN_OFFSET' }
+
+                local box = S.kaBox or Tabs.Farm:AddRightGroupbox('Kill Aura')
+                if S.kaBox then box:AddDivider() end -- under the multi-hit M1 part
+                S.kaBox = box -- other kill-aura parts can add to the same groupbox
+                box:AddLabel('Skill aura: casts YOUR equipped skills through\nthe game HUD slot keys when the real hit box of\na skill (its Config HITBOX_SIZE / OFFSET) covers\nenough mobs - skills hit every mob in the box.\nNever casts Blocking, never with a player near,\nnever sends a skill name itself.', true)
+                local status = box:AddLabel('Off', true)
+                local loadLbl = box:AddLabel('Loadout: -', true)
+                local refreshLoadout -- assigned below (button + signals)
+                box:AddToggle('SLKASkillAura', { Text = 'Skill aura', Default = false,
+                    Tooltip = 'Auto-casts the ticked skills when their hit box would hit Min targets mobs. With Mob / Quest farm on it only casts while the farm sits on a mob, and (while M1 is held) only in the gap after your finisher.' })
+                    :AddKeyPicker('SLKASkillAuraKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Skill aura' })
+                box:AddDropdown('SLKASSkills', { Values = {}, Default = {}, Multi = true, AllowNull = true, Text = 'Skills it may cast',
+                    Tooltip = 'Your current HUD loadout (Blocking and skills whose hold / tap branches are not modelled are never listed). New skills start ticked when they have a real area box at your root (10+ studs, not a grab / counter / dash / projectile) and lock you for 3.5s or less.' })
+                box:AddButton({ Text = 'Refresh loadout', Func = function() if refreshLoadout then task.spawn(refreshLoadout, true) end end })
+                box:AddSlider('SLKASMin', { Text = 'Min targets', Default = 2, Min = 1, Max = 8, Rounding = 0,
+                    Tooltip = 'Cast only when the box of the skill would hit at least this many mobs. A boss counts as 3.' })
+                box:AddToggle('SLKASAnyTime', { Text = 'Cast outside finisher gap', Default = false,
+                    Tooltip = 'Off: while the farm holds M1, cast only in the free gap after your 5th hit (the next M1 waits 1.65s; skills are client-locked for 0.5s after any M1). On: cast whenever ready - M1 is paused ~0.6s so the 0.5s lock clears.' })
+                box:AddSlider('SLKASGapEnd', { Text = 'Finisher gap end margin', Default = 0.35, Min = 0, Max = 1, Rounding = 2, Suffix = ' s',
+                    Tooltip = 'Stop starting casts this long before the next M1 is due (gap = 0.5s .. final 1.65s after the finisher).' })
+                box:AddToggle('SLKASHold', { Text = 'Hold skills to max', Default = false,
+                    Tooltip = 'Hold the key for the Max_Hold of the skill (minus 0.25s) instead of tapping - for hold-loop skills. Capped by Max hold time. Skills with a verified hold / tap branch always use their own hold time.' })
+                box:AddSlider('SLKASHoldCap', { Text = 'Max hold time', Default = 5, Min = 0.3, Max = 6, Rounding = 1, Suffix = ' s' })
+                box:AddSlider('SLKASDrop', { Text = 'Max cast drop', Default = 0, Min = 0, Max = 5, Rounding = 1, Suffix = ' studs',
+                    Tooltip = 'Farm only, cancel-bypass skills only (a stun cannot cancel them): many skill boxes start 3 studs under your root and miss from the head of the mob. Sinks you by the smallest amount (0.5 steps) that reaches Min targets, and only for ~0.35s around each hit - the rest of the cast you stay on the perch. 0 = never.' })
+                box:AddSlider('SLKASFallback', { Text = 'Fallback radius', Default = 10, Min = 4, Max = 30, Rounding = 0, Suffix = ' studs',
+                    Tooltip = 'Area used for a skill whose Config has no HITBOX_SIZE fields (a cube this far out from your root).' })
+                box:AddSlider('SLKASMargin', { Text = 'Skill box safety margin', Default = 1, Min = 0, Max = 4, Rounding = 1, Suffix = ' studs',
+                    Tooltip = 'Mobs only count if they are this far inside the box sideways (ping / mob movement). Height is not shrunk.' })
+                box:AddSlider('SLKASPlayerPad', { Text = 'Player safety pad', Default = 10, Min = 0, Max = 30, Rounding = 0, Suffix = ' studs',
+                    Tooltip = 'No cast while another player (or their clone) is within reach of ANY box of the skill plus this. Dash / projectile skills need 175 studs clear.' })
+                box:AddToggle('SLKASFace', { Text = 'Turn to the pack when not farming', Default = true,
+                    Tooltip = 'Off: only casts along the way you already face.' })
+                box:AddToggle('SLKASLog', { Text = 'Log casts', Default = false, Tooltip = 'Console: skill, predicted targets, drop, then how many actually took damage.' })
+
+                local slots, choice, infoCache = {}, {}, {}
+                local loadSig, lastLoad = nil, -1e9
+                local hudSig, stableSig, stableAt = nil, nil, 0 -- what the HUD holds / fresh-read stability
+                local busyUntil, retryAt = 0, {}
+                local castLog, lastTxt, lastStatus = {}, 'none', 0
+                local pressed, pressAt, pressKeep, faceHold = nil, 0, 0, false
+
+                -- ---- per-skill data from its Config + skill_info ------------------
+                local function skillFolder(name)
+                    local sk = RepStorage:FindFirstChild('Skills')
+                    if not sk then return nil end
+                    for _, style in ipairs(sk:GetChildren()) do -- Skills/<style>/<skill>/Config
+                        local f = style:FindFirstChild(name)
+                        if f and f:FindFirstChild('Config') then return f end
+                    end
+                    for _, d in ipairs(sk:GetDescendants()) do
+                        if d.Name == name and d:FindFirstChild('Config') then return d end
+                    end
+                    return nil
+                end
+                local function readConfig(name)
+                    local f = skillFolder(name)
+                    local c = f and f:FindFirstChild('Config')
+                    if not (c and c:IsA('ModuleScript')) then return nil end
+                    local ok, cfg = pcall(require, c)
+                    return (ok and type(cfg) == 'table') and cfg or nil
+                end
+                local function cfOf(v)
+                    if typeof(v) == 'CFrame' then return v end
+                    if typeof(v) == 'Vector3' then return CFrame.new(v) end
+                    return nil
+                end
+                -- <X>_HITBOX_SIZE pairs with <X>_HITBOX_OFFSET, then <X minus trailing
+                -- digits>_HITBOX_OFFSET (UPSLASH1_ -> UPSLASH_), then HITBOX_OFFSET; none
+                -- = root.CFrame itself (Unknowing FireServer.lua:145).
+                local function offsetFor(cfg, key)
+                    local cands = { (key:gsub('SIZE', 'OFFSET', 1)) }
+                    local base = key:match('^(.-)_?HITBOX_SIZE$')
+                    if base and base ~= '' then cands[#cands + 1] = (base:gsub('%d+$', '')) .. '_HITBOX_OFFSET' end
+                    cands[#cands + 1] = 'HITBOX_OFFSET'
+                    for _, k in ipairs(cands) do
+                        local cf = cfOf(cfg[k])
+                        if cf then return cf end
+                    end
+                    return CFrame.new()
+                end
+                local function chainOff(cfg, list) -- offsets applied one after another (Stone Wall BREAK)
+                    local cf = CFrame.new()
+                    for _, k in ipairs(list) do cf = cf * (cfOf(cfg[k]) or CFrame.new()) end
+                    return cf
+                end
+                local function statsOf(name, entry) -- entry.SkillStats, else StatsFetch.SkillStats.Get
+                    local st = type(entry) == 'table' and entry.SkillStats or nil
+                    if type(st) == 'table' then return st end
+                    if SFM and SFM.SkillStats and SFM.SkillStats.Get then
+                        local ok, r = pcall(SFM.SkillStats.Get, name)
+                        if ok and type(r) == 'table' then return r end
+                    end
+                    return {}
+                end
+                local function deriveInfo(name, entry)
+                    local cfg = readConfig(name)
+                    local mode = MODE[name]
+                    local all, hitAts, maxAt = {}, {}, nil
+                    local branch, mover, lockS = false, cfg == nil, 0
+                    if cfg then
+                        for k, v in pairs(cfg) do
+                            if type(k) == 'string' then
+                                if BRANCH[k] or k:sub(1, 4) == 'TAP_' then branch = true end
+                                for _, pat in ipairs(MOVER_KEYS) do
+                                    if k:find(pat, 1, true) then mover = true; break end
+                                end
+                                -- (RANGE_CHECK_HITBOX_SIZE etc. only test range, they deal no damage)
+                                if typeof(v) == 'Vector3' and k:find('HITBOX', 1, true) and k:find('SIZE', 1, true) and not k:find('CHECK', 1, true) then
+                                    local off = (mode and mode.offs and mode.offs[k]) and chainOff(cfg, mode.offs[k]) or offsetFor(cfg, k)
+                                    local far = off.Position.Magnitude > 40 -- set relative to a projectile / aim point
+                                    if far then mover = true end
+                                    all[#all + 1] = { key = k, size = v, off = off, far = far,
+                                        single = (k:find('GRAB', 1, true) or k:find('CATCH', 1, true) or k:find('SCAN', 1, true)) ~= nil }
+                                elseif type(v) == 'number' then
+                                    if k:match('_AT$') and v > 0 and v < 8 then -- hit times (SLASH1_AT, HEAD_AT ...)
+                                        hitAts[#hitAts + 1] = v
+                                        maxAt = math.max(maxAt or 0, v)
+                                    end
+                                    if ((k:find('LOCK', 1, true) and not k:find('HOLD_LOCK', 1, true) and k:sub(1, 4) ~= 'TAP_')
+                                        or k == 'RELEASE_DUR') and v > 0 and v < 10 then
+                                        lockS = math.max(lockS, v) -- pause_gameplay / NR after the cast
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    if #all == 0 then mover = true end -- no box data: unknown geometry
+                    table.sort(all, function(a, b) return a.key < b.key end)
+                    local use = {}
+                    if mode then
+                        for _, b in ipairs(all) do if mode.keys[b.key] then use[#use + 1] = b end end
+                    else
+                        for _, b in ipairs(all) do if not b.far and not b.single then use[#use + 1] = b end end
+                        if #use == 0 then for _, b in ipairs(all) do if not b.far then use[#use + 1] = b end end end
+                    end
+                    local reach, fwd, aoe, guard = 0, 0, false, 0
+                    for _, b in ipairs(use) do
+                        local p = b.off.Position
+                        reach = math.max(reach, Vector3.new(p.X, 0, p.Z).Magnitude + math.max(b.size.X, b.size.Z) / 2)
+                        fwd = math.max(fwd, -p.Z)
+                        if not b.single and math.max(b.size.X, b.size.Z) >= 10 then aoe = true end
+                    end
+                    for _, b in ipairs(all) do guard = math.max(guard, b.off.Position.Magnitude + b.size.Magnitude / 2) end
+                    if mover then guard = math.max(guard, MOVER_GUARD) end
+                    local pinfo = PP and type(PP.skill_info) == 'table' and PP.skill_info[name] or nil -- Items.lua:42
+                    local stats = statsOf(name, entry)
+                    local counter = stats.counter ~= nil
+                    local unsupported = (branch and not mode) and 'hold/tap branches not modelled' or nil
+                    local hits = mode and mode.hits or { 0 }
+                    if not mode then for _, a in ipairs(hitAts) do hits[#hits + 1] = a end end
+                    local lastHit = 0
+                    for _, a in ipairs(hits) do lastHit = math.max(lastHit, a) end
+                    local hold = mode and mode.hold or 0.1
+                    local lock = hold + ((mode and mode.lock) or lockS)
+                    local cdName = (pinfo and pinfo.CoolDownName) or name
+                    if MCD and MCD.filter_cd_name then
+                        local ok, n = pcall(MCD.filter_cd_name, LP, name)
+                        if ok and type(n) == 'string' and n ~= '' then cdName = n end
+                    end
+                    return {
+                        name = name, boxes = use, all = all, cfg = cfg ~= nil, reach = reach, fwd = fwd,
+                        aoe = aoe and (mode ~= nil or not counter) and not unsupported,
+                        mover = mover, guard = guard, unsupported = unsupported, mode = mode,
+                        rootAim = #use > 0 and (mode ~= nil or not mover), -- boxes sit at our root: aim at root height
+                        tap = mode and mode.tap or false, hold = hold, keep = mode and mode.keep or 0,
+                        rel = mode and mode.rel or 'any', hits = hits, lastHit = lastHit,
+                        after = mode and (lastHit + 0.4) or math.clamp((maxAt or 0.8) + 0.4, 0.6, 4),
+                        lock = lock,
+                        cancelBypass = stats.cancel_bypass ~= nil, -- stun can't cancel it (ManuelCancel.lua, HUD Skills.lua:244-253)
+                        maxHold = tonumber(type(entry) == 'table' and entry.Max_Hold) or (pinfo and tonumber(pinfo.Max_Hold_Time)) or 0,
+                        stamina = (pinfo and tonumber(pinfo.Stamina)) or tonumber(type(entry) == 'table' and entry.Stamina) or 0,
+                        cd = tonumber(type(entry) == 'table' and entry.CoolDown) or (pinfo and tonumber(pinfo.Cooldown)) or 0,
+                        cdName = cdName, -- manage_cd.filter_cd_name (manage_cd.lua:124-132)
+                        category = pinfo and pinfo.Category or nil,
+                        requiresAura = pinfo and pinfo.RequiresAura or nil,
+                        requiresModeBar = pinfo and pinfo.RequiresModeBar == true or false,
+                        autoTick = false,
+                    }
+                end
+
+                -- ---- readiness (same checks as Skills_Module.Can_Skill, read-only) --
+                local function cdLeft(info)
+                    local c = LP.Character
+                    if not c then return 99 end
+                    local shc = c:FindFirstChild('SHC') -- client stamp (HUD Skills.lua:503)
+                    local v = shc and shc:FindFirstChild(info.cdName)
+                    if v then
+                        local st = v:GetAttribute('Started')
+                        local left = (st and type(v.Value) == 'number') and (v.Value - (os.clock() - st)) or 1
+                        return math.max(left, 0.05)
+                    end
+                    local shcs = c:FindFirstChild('SHCS') -- server stamp, removed 0.25s early (manage_cd.lua:120)
+                    if shcs and shcs:FindFirstChild(info.cdName) then return 0.25 end
+                    return 0
+                end
+                local function staminaOk(info) -- Skills_Module.lua:304-310
+                    if (info.stamina or 0) <= 0 then return true end
+                    local v = S.values()
+                    local st = v and v:FindFirstChild('Stamina')
+                    if not (st and type(st.Value) == 'number') then return true end
+                    local f = 0
+                    if PSR and PSR.GetStat then
+                        local ok, a = pcall(PSR.GetStat, LP, 'Stamina Cost Factor')
+                        if ok and type(a) == 'number' then f = f + a end
+                        if info.category then
+                            local ok2, b = pcall(PSR.GetStat, LP, tostring(info.category) .. ' Stamina Cost Factor')
+                            if ok2 and type(b) == 'number' then f = f + b end
+                        end
+                    end
+                    return st.Value >= math.max(0, info.stamina * (1 + f))
+                end
+                local function skillsOff(name) -- Values.skillsdisabled (Skills_Module.lua:253-260)
+                    local v = S.values()
+                    local sd = v and v:FindFirstChild('skillsdisabled')
+                    if not sd then return false end
+                    local s = tostring(sd.Value)
+                    if s:find('all', 1, true) then return s:find('except' .. name, 1, true) == nil end
+                    return s:find(name, 1, true) ~= nil
+                end
+                local function isLocked(name) -- HUD lock icon (Skills.lua:208-209)
+                    if not (STATS and STATS.GetRequirements) then return false end
+                    local ok, _, unlocked = pcall(STATS.GetRequirements, LP, name)
+                    return ok and unlocked ~= true
+                end
+                -- nil = castable now, else why not. Mirrors the Can_Skill / Attempt_Hold
+                -- outcomes that would otherwise be a wasted press: RequiresAura (Skills_Module
+                -- .lua:296-301), RequiresModeBar (:327-340, Skills_Provider.ModeBarFull), and a
+                -- pending Skill_Switch follow-up (Attempt_Hold sends 'Switch' instead of the
+                -- cast, Skill_Controller.lua:106-128).
+                local function notReady(s, now)
+                    local info = s.info
+                    if s.locked then return 'locked' end
+                    if info.unsupported then return info.unsupported end
+                    if now < (retryAt[s.name] or 0) then return 'retry' end
+                    if cdLeft(info) > 0 then return 'cooldown' end
+                    if not staminaOk(info) then return 'stamina' end
+                    if skillsOff(s.name) then return 'disabled' end
+                    local pi = PP and type(PP.skill_info) == 'table' and PP.skill_info[s.name] or nil
+                    local aura = (pi and pi.RequiresAura) or info.requiresAura
+                    if aura then
+                        local v = S.values()
+                        if not (v and v:FindFirstChild(aura)) then return tostring(aura) .. ' not active' end
+                    end
+                    if (pi and pi.RequiresModeBar == true) or info.requiresModeBar then
+                        local full = false
+                        if SP and SP.ModeBarFull then
+                            local ok, r = pcall(SP.ModeBarFull)
+                            full = ok and r == true
+                        end
+                        if not full then return 'mode bar not full' end
+                    end
+                    local sw = LP:FindFirstChild(s.name .. ((SSA and SSA.extension) or 'Skill_Switch'))
+                    if sw and not sw:FindFirstChild('Disabled') then return 'switch follow-up pending' end
+                    return nil
+                end
+
+                -- ---- loadout ------------------------------------------------------
+                local function sigOf(list) -- slot names 1..10, the part of the list the HUD casts from
+                    local t = {}
+                    for i = 1, #SLOT_KEYS do
+                        local e = type(list) == 'table' and list[i] or nil
+                        t[i] = (type(e) == 'table' and type(e.Name) == 'string') and e.Name or ''
+                    end
+                    return table.concat(t, '|')
+                end
+                local function updateLoadLabel()
+                    if #slots == 0 then S.setText(loadLbl, 'Loadout: none (equip your weapon / power)'); return end
+                    local L = {}
+                    for _, s in ipairs(slots) do
+                        local i = s.info
+                        local how
+                        if i.unsupported then
+                            how = 'NOT CAST (' .. i.unsupported .. ')'
+                        else
+                            how = ((i.mode and not i.tap) and ('hold %.2fs, '):format(i.hold) or 'tap, ')
+                                .. ((#i.boxes > 0) and ('%d box, reach %.0f, fwd %.0f%s'):format(#i.boxes, i.reach, i.fwd, i.aoe and ', AoE' or '')
+                                    or 'no box data (fallback radius)')
+                                .. ('  lock %.1fs  clear %.0f%s'):format(i.lock, i.guard, i.mover and ' (dash/proj)' or '')
+                        end
+                        L[#L + 1] = ('%d %s%s: %s  cd %ss  st %s'):format(s.idx, s.name, s.locked and ' [locked]' or '',
+                            how, tostring(i.cd), tostring(i.stamina))
+                    end
+                    S.setText(loadLbl, 'Loadout:\n' .. table.concat(L, '\n'))
+                end
+                local function applyKeys(list)
+                    lastLoad = os.clock()
+                    if type(list) ~= 'table' then return end
+                    local sigAll = sigOf(list)
+                    if sigAll ~= stableSig then stableSig, stableAt = sigAll, os.clock() end
+                    local newSlots, names = {}, {}
+                    for i, key in ipairs(SLOT_KEYS) do
+                        local e = list[i]
+                        local nm = type(e) == 'table' and e.Name or nil
+                        if type(nm) == 'string' and nm ~= '' and not NEVER[nm] then
+                            local info = infoCache[nm]
+                            if not info then
+                                info = deriveInfo(nm, e)
+                                info.autoTick = info.aoe and (info.mode ~= nil or not info.mover) and info.lock <= 3.5
+                                infoCache[nm] = info
+                            end
+                            newSlots[#newSlots + 1] = { idx = i, key = key, name = nm, info = info, locked = isLocked(nm) }
+                            if not info.unsupported then names[#names + 1] = nm end
+                        end
+                    end
+                    slots = newSlots
+                    if sigAll ~= loadSig then
+                        loadSig = sigAll
+                        local nv = {}
+                        for _, sl in ipairs(newSlots) do
+                            if not sl.info.unsupported then
+                                local want = choice[sl.name]
+                                if want == nil then want = sl.info.autoTick end -- first time seen
+                                if want then nv[sl.name] = true end
+                            end
+                        end
+                        S.ui()
+                        pcall(function() Options.SLKASSkills:SetValues(names); Options.SLKASSkills:SetValue(nv) end)
+                    end
+                    updateLoadLabel()
+                end
+                Options.SLKASSkills:OnChanged(function()
+                    local v = Options.SLKASSkills.Value
+                    v = type(v) == 'table' and v or {}
+                    for _, s in ipairs(slots) do
+                        if not s.info.unsupported then choice[s.name] = v[s.name] == true end
+                    end
+                end)
+                refreshLoadout = function(force)
+                    if not (SP and type(SP.get_current_keys) == 'function') then
+                        lastLoad = os.clock()
+                        S.setText(loadLbl, 'Skills_Provider not loaded - skill aura unavailable')
+                        return
+                    end
+                    if force then loadSig = nil; infoCache = {} end
+                    local ok, list = pcall(SP.get_current_keys)
+                    if ok then applyKeys(list) else lastLoad = os.clock() end
+                end
+                if SP and type(SP.Keys_Changed) == 'table' and SP.Keys_Changed.Connect then
+                    local ok, conn = pcall(function()
+                        return SP.Keys_Changed:Connect(function(list)
+                            hudSig = sigOf(list) -- the HUD's updateSkills got this same list (Skills.lua:224-225)
+                            task.defer(applyKeys, list)
+                        end)
+                    end)
+                    if ok and conn then htrack(conn) end
+                end
+                htrack(LP.CharacterAdded:Connect(function()
+                    hudSig, stableSig = nil, nil -- the HUD remounts and re-reads get_current_keys()
+                    task.delay(2.5, function() if not S.dead then refreshLoadout(false) end end)
+                end))
+
+                -- ---- M1 timing (Combat_presets fields the client combat writes) ----
+                local function myPreset() -- same pick as CU/Combat.lua: tool preset or its CombatPreset
+                    if not (CPm and type(CPm.Presets) == 'table') then return nil end
+                    local CIP = S.req('CAM.Global.Character_info_provider')
+                    local tool
+                    if CIP and CIP.Get_equipped_tool then
+                        local ok, t = pcall(CIP.Get_equipped_tool, LP)
+                        if ok then tool = t end
+                    end
+                    local n = tool and tool.Name
+                    if n and CPm.Presets[n] then return CPm.Presets[n] end
+                    local IT = S.req('CAM.Global.Collectibles.Items')
+                    local it = n and IT and IT[n]
+                    if type(it) == 'table' then return CPm.Presets[it.CombatPreset or 'Regular Katana'] or CPm.Presets.Combat end
+                    return CPm.Presets.Combat
+                end
+                -- 'lock' = <0.5s since an M1 (Checker.lua:109 refuses skills), 'gap' =
+                -- after the finisher before the next M1 is due, 'idle' = M1 not landing,
+                -- 'combo' = mid-chain.
+                local function gapState()
+                    if not CPm then return 'idle', 99 end
+                    local since = os.clock() - (tonumber(CPm.Last_Punched) or 0)
+                    if since < (tonumber(CPm.slow_walk_duration) or 0.5) then return 'lock', since end
+                    local pre = myPreset()
+                    local final = (pre and tonumber(pre.final)) or 1.65
+                    if since > final + 0.35 then return 'idle', since end
+                    local mx = (pre and tonumber(pre.Max)) or 5
+                    local lc = CPm.Last_Combo
+                    if (lc == mx or lc == 7) and since <= final - Options.SLKASGapEnd.Value then return 'gap', since end
+                    return 'combo', since
+                end
+
+                -- ---- area evaluation ---------------------------------------------
+                local function weightOf(m) return (m.Parent and m.Parent:FindFirstChild('BossInfo')) and BOSS_W or 1 end
+                -- Weighted centroid of hittable, non-civilian mobs within reach of pos.
+                local function packAim(mobs, pos, reach)
+                    local sum, w = Vector3.zero, 0
+                    for _, m in ipairs(mobs) do
+                        if not (m.civ and not m.boss) and (m.root.Position - pos).Magnitude <= reach + 6 and S.kaHittable(m.model, 'skill') then
+                            local k = m.boss and BOSS_W or 1
+                            sum = sum + m.root.Position * k
+                            w = w + k
+                        end
+                    end
+                    if w == 0 then return nil, 0 end
+                    return sum / w, w
+                end
+                -- Union of mobs over the skill's scoring boxes cast from frame cf0, or nil +
+                -- why: 'player' (any of ALL its boxes, grown by the pad, touches another
+                -- player / clone), 'perfect' (a Perfect-blocking mob in a scoring box),
+                -- 'civilian' (Skip civilians on and one is in a scoring box).
+                local function scoreBoxes(info, cf0, checkPlayers)
+                    local margin = Options.SLKASMargin.Value
+                    local pad = Options.SLKASPlayerPad.Value * 2
+                    local use, all = info.boxes, info.all
+                    if #use == 0 then
+                        local d = Options.SLKASFallback.Value * 2
+                        use = { { size = Vector3.new(d, d, d), off = CFrame.new() } }
+                        if #all == 0 then all = use end
+                    end
+                    if checkPlayers then
+                        for _, b in ipairs(all) do
+                            local cf, sz = cf0 * b.off, b.size + Vector3.new(pad, pad, pad)
+                            if S.kaPlayersInBox(cf, sz) > 0 then return nil, 'player' end
+                            local _, pl = S.kaTargetsInBox(cf, sz, nil)
+                            if pl > 0 then return nil, 'player' end
+                        end
+                    end
+                    local skipCiv = Toggles.SLFarmSkipCiv and Toggles.SLFarmSkipCiv.Value
+                    local seen, score, n, list = {}, 0, 0, {}
+                    for _, b in ipairs(use) do
+                        local cf = cf0 * b.off
+                        local _, _, _, _, civs, perfect = S.kaTargetsInBox(cf, b.size + Vector3.new(margin, margin, margin) * 2, nil)
+                        if perfect > 0 then return nil, 'perfect' end
+                        if civs > 0 and skipCiv then return nil, 'civilian' end
+                        local sz = b.size - Vector3.new(margin, 0, margin) * 2 -- sideways only: height is exact
+                        local _, _, mobs = S.kaTargetsInBox(cf, Vector3.new(math.max(sz.X, 1), sz.Y, math.max(sz.Z, 1)), 'skill')
+                        for _, m in ipairs(mobs) do
+                            if not seen[m] then
+                                seen[m] = true
+                                n = n + 1
+                                list[#list + 1] = m
+                                score = score + weightOf(m)
+                            end
+                        end
+                    end
+                    return score, n, list
+                end
+                -- Candidate frames: facing the centroid (only if we can hold that facing)
+                -- and our current facing, at drop 0 then 0.5-stud steps up to dropMax;
+                -- the smallest drop that reaches Min targets wins. Any 'player' = hold.
+                local function evalSkill(info, root, centroid, dropMax, canTurn)
+                    local p = root.Position
+                    local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
+                    look = (look.Magnitude > 0.1) and look.Unit or Vector3.new(0, 0, -1)
+                    local flat = (centroid - p) * Vector3.new(1, 0, 1)
+                    local dirs = (canTurn and flat.Magnitude > 1.5) and { flat.Unit, look } or { look }
+                    local drops = { 0 }
+                    if dropMax > 0 then
+                        local d = 0.5
+                        while d <= dropMax + 1e-6 do drops[#drops + 1] = d; d = d + 0.5 end
+                    end
+                    local minT = Options.SLKASMin.Value
+                    local best, why
+                    for _, d in ipairs(drops) do
+                        local at = p - Vector3.new(0, d, 0)
+                        for _, dir in ipairs(dirs) do
+                            local sc, n, list = scoreBoxes(info, CFrame.lookAt(at, at + dir), d == 0)
+                            if not sc then
+                                if n == 'player' then return nil, 'player' end
+                                why = n
+                            elseif not best or sc > best.score then
+                                -- root-box skills aim level with our root (skills that align the
+                                -- root to mousepos would otherwise pitch every box); projectile /
+                                -- no-box skills aim at the pack itself.
+                                local aimY = info.rootAim and at.Y or centroid.Y
+                                best = { score = sc, n = n, mobs = list, drop = d, dir = dir,
+                                    aim = Vector3.new(at.X, aimY, at.Z) + dir * math.max(6, flat.Magnitude) }
+                            end
+                        end
+                        if best and best.score >= minT then break end
+                    end
+                    return best, why
+                end
+
+                local function cpm()
+                    local now, keep = os.clock(), {}
+                    for _, t in ipairs(castLog) do if now - t <= 60 then keep[#keep + 1] = t end end
+                    castLog = keep
+                    return #keep
+                end
+                local function setStatus(t, force)
+                    if not force and os.clock() - lastStatus < 0.25 then return end
+                    lastStatus = os.clock()
+                    S.setText(status, t .. ('\nLast: %s  |  %d casts/min'):format(lastTxt, cpm()))
+                end
+                local function dmgOf(m) -- mob.DMG.<attacker Name> = running damage total
+                    local d = m:FindFirstChild('DMG')
+                    local v = d and d:FindFirstChild(LP.Name)
+                    return (v and tonumber(v.Value)) or 0
+                end
+                local function guardRadius(info) return info.guard + Options.SLKASPlayerPad.Value * 1.8 + 5 end
+
+                -- ---- one cast through the HUD slot key -----------------------------
+                local function fired(s, tPress) -- the HUD's Attempt_Hold went through
+                    local c = LP.Character
+                    local shc = c and c:FindFirstChild('SHC')
+                    if shc and (shc.Value == s.name or shc:FindFirstChild(s.info.cdName) ~= nil) then return true end
+                    local pi = PP and type(PP.skill_info) == 'table' and PP.skill_info[s.name] or nil
+                    return type(pi) == 'table' and type(pi.lastUsed) == 'number' and pi.lastUsed >= tPress - 0.02 -- Skill_Controller.lua:178
+                end
+                local function releasePressed() -- never before the skill's keep time (tap-branch flip)
+                    local k = pressed
+                    if not k then return end
+                    local wait = pressKeep - (os.clock() - pressAt)
+                    pressed = nil
+                    S.kaCasting = false
+                    if wait > 0 then task.delay(wait, function() pcall(IH.VirtualRelease, k) end) else pcall(IH.VirtualRelease, k) end
+                end
+                local function holdAbort(info, now)
+                    if not Toggles.SLKASkillAura.Value or S.dead then return 'aura off' end
+                    if (S.farmDodgeFrom or 0) <= now + 0.1 and (S.farmDodgeUntil or 0) > now then return 'farm dodge' end
+                    if now >= (S.farmHoldOutFrom or 0) and now < (S.farmHoldOutUntil or 0) then return 'farm dodge' end
+                    local r = S.root()
+                    if r and S.kaPlayersNear(r.Position, guardRadius(info)) > 0 then return 'player came near' end
+                    return nil
+                end
+                local function cast(s, e)
+                    local info = s.info
+                    local hold = info.hold
+                    if not info.mode and Toggles.SLKASHold.Value and (info.maxHold or 0) > 0 then
+                        hold = math.clamp(info.maxHold - 0.25, 0.1, Options.SLKASHoldCap.Value)
+                    end
+                    local span = (info.rel == 'press') and (math.max(hold, info.lastHit) + 0.4) or (hold + info.after)
+                    local farm = S.farmLocked
+                    local t0 = os.clock()
+                    -- 1) face / aim first; the settle wait below lets it replicate
+                    S.kaSkill, S.kaAim, S.kaDropWins = s.name, e.aim, nil
+                    S.kaDrop = (farm and info.cancelBypass) and e.drop or 0
+                    S.kaAimUntil = t0 + 1 + span
+                    faceHold = (not farm) and Toggles.SLKASFace.Value
+                    -- 2) the HUD slot must hold THIS skill, and the HUD's cached list must be
+                    --    the fresh one (it casts ITS name, Skills.lua:279-287)
+                    local okK, list = pcall(SP.get_current_keys)
+                    if not (okK and type(list) == 'table') then return false, 'loadout unreadable' end
+                    local cur = list[s.idx]
+                    if not (type(cur) == 'table' and cur.Name == s.name) then applyKeys(list); return false, 'loadout changed' end
+                    local fresh = sigOf(list)
+                    if hudSig ~= nil then
+                        if fresh ~= hudSig then return false, 'loadout changing (HUD not updated yet)' end
+                    elseif not (stableSig == fresh and os.clock() - stableAt >= 0.5) then
+                        if stableSig ~= fresh then stableSig, stableAt = fresh, os.clock() end
+                        return false, 'confirming loadout'
+                    end
+                    local c = LP.Character
+                    local shc = c and c:FindFirstChild('SHC')
+                    if shc and (shc.Value ~= '' or shc:GetAttribute('en') == true) then return false, 'busy' end
+                    if CK and CK.check then -- the exact gate Attempt_Hold runs (Skill_Controller.lua:132)
+                        local okC, can = pcall(CK.check, LP, s.name)
+                        if okC and not can then return false, 'game refused it right now' end
+                    end
+                    if IH.IsAvailable and not IH.IsAvailable() then return false, 'busy' end
+                    -- 3) rest M1 for the cast, then settle: frames + half a ping so the new
+                    --    facing / drop is on the server before the Hold remote lands
+                    if farm then
+                        S.farmBlockUntil = math.max(S.farmBlockUntil or 0, os.clock() + 0.3 + hold)
+                        if S.releaseM1 then S.releaseM1() end
+                    end
+                    local tPlan = os.clock() + 0.06 + math.clamp(S.pingSec() * 0.5, 0.03, 0.15)
+                    if S.kaDrop > 0 then -- sink only around each hit (client time ~ press + at)
+                        local wins = {}
+                        for _, at in ipairs(info.hits) do
+                            if info.rel == 'press' then
+                                wins[#wins + 1] = { tPlan + at - 0.18, tPlan + at + 0.18 }
+                            elseif info.rel == 'release' then
+                                wins[#wins + 1] = { tPlan + hold + at - 0.18, tPlan + hold + at + 0.18 }
+                            else -- unknown base: cover press- and release-relative
+                                wins[#wins + 1] = { tPlan + at - 0.18, tPlan + hold + at + 0.18 }
+                            end
+                        end
+                        S.kaDropWins = wins
+                    end
+                    S.kaAimUntil = tPlan + span
+                    busyUntil = S.kaAimUntil + 0.3
+                    for _ = 1, 3 do RunService.RenderStepped:Wait() end
+                    if os.clock() < tPlan then task.wait(tPlan - os.clock()) end
+                    local r0 = S.root()
+                    if not r0 or S.kaPlayersNear(r0.Position, guardRadius(info)) > 0 then return false, 'player came near' end
+                    if S.farmLocked ~= farm then return false, 'farm moved' end
+                    if farm then S.farmBlockUntil = math.max(S.farmBlockUntil or 0, os.clock() + hold + 0.15) end
+                    local snap, hp0 = {}, {}
+                    for _, m in ipairs(e.mobs) do
+                        snap[m] = dmgOf(m)
+                        local h = m:FindFirstChildOfClass('Humanoid')
+                        hp0[m] = h and h.Health or 0
+                    end
+                    -- 4) press the HUD slot key; hold with abort checks (never release
+                    --    before info.keep: Flame Tiger under 0.3s = its projectile branch)
+                    local tPress = os.clock()
+                    pressed, pressAt, pressKeep = s.key, tPress, info.keep
+                    S.kaCasting = true
+                    pcall(IH.VirtualPress, s.key)
+                    local started, abortWhy = false, nil
+                    while true do
+                        local now = os.clock()
+                        if not started then started = fired(s, tPress) end
+                        if now - tPress >= hold then break end
+                        if now - tPress >= pressKeep then
+                            if not started and now - tPress > 0.35 then break end -- never went out
+                            abortWhy = holdAbort(info, now)
+                            if abortWhy then break end
+                        end
+                        RunService.Heartbeat:Wait()
+                    end
+                    releasePressed()
+                    if not started then
+                        local t1 = os.clock()
+                        repeat
+                            task.wait(0.05)
+                            started = fired(s, tPress)
+                        until started or os.clock() - t1 > 0.4
+                    end
+                    if not started then retryAt[s.name] = os.clock() + 2; return false, s.name .. ' did not fire' end
+                    if abortWhy then
+                        S.kaAimUntil, S.kaDropWins = 0, nil
+                        busyUntil = os.clock() + 0.5
+                    end
+                    castLog[#castLog + 1] = os.clock()
+                    lastTxt = ('%s -> %d target(s)%s%s'):format(s.name, e.n, e.drop > 0 and (' [-%.1f]'):format(e.drop) or '',
+                        abortWhy and (' (released early: ' .. abortWhy .. ')') or '')
+                    if Toggles.SLKASLog.Value then
+                        print(('[Skill aura] %s  targets %d (score %d)  drop %.1f  hold %.2fs%s'):format(s.name, e.n, e.score, e.drop, hold,
+                            abortWhy and ('  released early: ' .. abortWhy) or ''))
+                    end
+                    task.delay(math.max(0.2, tPress + span - os.clock()) + 0.4, function()
+                        local hit = 0
+                        for m, d0 in pairs(snap) do
+                            local h = m:FindFirstChildOfClass('Humanoid')
+                            if not m.Parent or not h or h.Health <= 0 or dmgOf(m) > d0 or h.Health < (hp0[m] or 0) - 0.01 then hit = hit + 1 end
+                        end
+                        lastTxt = ('%s -> %d target(s), ~%d hit'):format(s.name, e.n, hit)
+                        if Toggles.SLKASLog.Value then print(('[Skill aura] %s  ~%d / %d took damage'):format(s.name, hit, e.n)) end
+                    end)
+                    return true
+                end
+
+                local function tick()
+                    if not Toggles.SLKASkillAura.Value then return end
+                    local now = os.clock()
+                    if loadSig == nil or now - lastLoad > 5 then refreshLoadout(false) end
+                    if now < busyUntil then return end -- a cast is in flight
+                    local root, hum = S.root(), S.hum()
+                    if not (root and hum and hum.Health > 0) then setStatus('Waiting for character'); return end
+                    if not IH then setStatus('InputHandler not loaded - cannot cast'); return end
+                    if not SP then setStatus('Skills_Provider not loaded - cannot cast'); return end
+                    local farmOn = Toggles.SLMobFarm.Value or (Toggles.SLAutoQuest and Toggles.SLAutoQuest.Value)
+                    if farmOn and (S.farmPaused or not S.farmLocked) then setStatus('Waiting for the farm to lock on a mob'); return end
+                    if farmOn and ((now >= (S.farmHoldOutFrom or 0) and now < (S.farmHoldOutUntil or 0))
+                        or ((S.farmDodgeUntil or 0) > now - 0.15 and (S.farmDodgeFrom or 0) < now + 1)) then
+                        setStatus('Holding casts: dodge window'); return
+                    end
+                    local c = LP.Character
+                    local shc = c and c:FindFirstChild('SHC')
+                    if (shc and (shc.Value ~= '' or shc:GetAttribute('en') == true)) or (IH.IsAvailable and not IH.IsAvailable()) then
+                        setStatus('Busy (stun / skill / block)'); return
+                    end
+                    -- M1 timing first: nothing below is worth computing while we can't cast
+                    local farmAttacking = farmOn and S.farmLocked and Toggles.SLFarmM1 and Toggles.SLFarmM1.Value
+                    local anyTime = Toggles.SLKASAnyTime.Value
+                    local g, since = gapState()
+                    if g == 'lock' and not (farmAttacking and anyTime) then setStatus('M1 lock (skills refused for 0.5s after an M1)'); return end
+                    if farmAttacking and not anyTime and g == 'combo' then setStatus('Waiting for the finisher gap'); return end
+                    local sel = Options.SLKASSkills.Value
+                    sel = type(sel) == 'table' and sel or {}
+                    local minT = Options.SLKASMin.Value
+                    local canTurn = S.farmLocked or Toggles.SLKASFace.Value -- a facing we can hold through the cast
+                    local mobs = S.mobs()
+                    local best, bestSlot, bestRank, note, anySel = nil, nil, nil, nil, false
+                    for _, s in ipairs(slots) do
+                        local info = s.info
+                        if sel[s.name] and not info.unsupported then
+                            anySel = true
+                            local nr = notReady(s, now)
+                            if nr and nr ~= 'cooldown' and nr ~= 'retry' and nr ~= 'stamina' then
+                                note = note or (s.name .. ': ' .. nr)
+                            elseif not nr then
+                                local R = guardRadius(info)
+                                local np, nearest = S.kaPlayersNear(root.Position, R)
+                                if np > 0 then
+                                    note = ('Player %.0f studs away - %s needs %.0f clear'):format(nearest, s.name, R)
+                                else
+                                    local reach = (#info.boxes > 0) and info.reach or Options.SLKASFallback.Value
+                                    local centroid, w = packAim(mobs, root.Position, reach)
+                                    if centroid and w >= minT then
+                                        local dropMax = (farmOn and S.farmLocked and info.cancelBypass) and Options.SLKASDrop.Value or 0
+                                        local e, bad = evalSkill(info, root, centroid, dropMax, canTurn)
+                                        if e and e.score >= minT then
+                                            -- lock time costs M1 hits (~1.86/s) the cast has to make up for
+                                            local rank = e.score - info.lock * 1.86 / math.max(e.score, 1)
+                                            if not bestRank or rank > bestRank or (rank == bestRank and info.cd > bestSlot.info.cd) then
+                                                best, bestSlot, bestRank = e, s, rank
+                                            end
+                                        elseif bad == 'player' then note = 'Player / clone near a ' .. s.name .. ' box - holding'
+                                        elseif bad == 'perfect' then note = 'A mob in range is perfect-blocking'
+                                        elseif bad == 'civilian' then note = 'Civilian in a ' .. s.name .. ' box (Skip civilians is on)'
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    if not best then
+                        setStatus(not anySel and 'No skill ticked (or loadout empty)' or note or 'Waiting: no ready skill covers a pack')
+                        return
+                    end
+                    if g == 'lock' then -- farm M1 + 'Cast outside finisher gap': rest M1 so the 0.5s lock clears
+                        S.farmBlockUntil = math.max(S.farmBlockUntil or 0, now + 0.85 - since)
+                        setStatus(('%s ready (%d targets) - resting M1 for the skill lock'):format(bestSlot.name, best.n)); return
+                    end
+                    busyUntil = now + 8 -- cast() sets the real window
+                    setStatus(('Casting %s at %d target(s)%s'):format(bestSlot.name, best.n, best.drop > 0 and (' (drop %.1f)'):format(best.drop) or ''), true)
+                    task.spawn(function()
+                        local ok, res, why = pcall(cast, bestSlot, best)
+                        if not (ok and res) then
+                            releasePressed()
+                            S.kaAimUntil, S.kaDropWins = 0, nil
+                            busyUntil = os.clock() + 0.3
+                            setStatus('Cast skipped: ' .. tostring(ok and why or res), true)
+                        end
+                    end)
+                end
+                task.spawn(function()
+                    task.wait(1)
+                    refreshLoadout(false)
+                    while not S.dead do
+                        local ok, err = pcall(tick)
+                        if not ok then setStatus('Skill aura error: ' .. tostring(err), true) end
+                        task.wait(0.12)
+                    end
+                end)
+                -- not farming + Turn to the pack: hold the scored facing through the cast
+                -- (the farm does this itself while locked)
+                htrack(RunService.RenderStepped:Connect(function()
+                    if not faceHold or S.farmLocked then return end
+                    if not S.kaAim or os.clock() >= (S.kaAimUntil or 0) then faceHold = false; return end
+                    local r = S.root()
+                    if not r then return end
+                    local fl = (S.kaAim - r.Position) * Vector3.new(1, 0, 1)
+                    if fl.Magnitude > 0.5 then r.CFrame = CFrame.lookAt(r.Position, r.Position + fl.Unit) end
+                end))
+                Toggles.SLKASkillAura:OnChanged(function()
+                    if Toggles.SLKASkillAura.Value then
+                        task.spawn(refreshLoadout, true)
+                    else
+                        releasePressed() -- (a hold loop in flight also sees the toggle and stops)
+                        S.kaAimUntil, S.kaDropWins = 0, nil
+                        busyUntil = 0
+                        setStatus('Off', true)
+                    end
+                end)
+                if not SP then box:AddLabel('Skills_Provider not loaded - skill aura unavailable.', true) end
+                htrack({ Disconnect = function()
+                    S.kaAimUntil, S.kaDropWins = 0, nil
+                    if IH then releasePressed() end
+                end })
+            end)()
 
             -- ================================================================
             -- LOOT / CHEST / QUEST-PICKUP HELPERS + BOSS HUNTS
@@ -2578,11 +5073,74 @@ if HUB_CURRENT ~= 'roguecopy' then
                 if not fireproximityprompt then box:AddLabel('Executor lacks fireproximityprompt - helpers disabled.', true) end
 
                 -- ---- Boss hunts (ReplicatedStorage.BossHunts board) ----------
+                -- Board entries (DialogueComponent/Components/Quests.lua readHunt): attributes
+                -- Quest (= its Quests.Holder key, "Eliminate <Npc>"), Boss, Side ('Muzan' |
+                -- 'Crow'), Tier (a STRING: Mythic > Legendary > Epic > Rare > UnCommon >
+                -- Common), ExpiresAt. BossHunts.Sides: Muzan = Demon/Hybrid, Crow =
+                -- Slayer/Hybrid (Humans get none). Worth = Rewards(Entry(Boss)).Exp x
+                -- Factor(entry) (0.5 solo / private .. 1 with 3+ eligible players) - what
+                -- the hunt card shows. Claim = BossHuntsRequest{action="Claim", id}, sent
+                -- only when Quests.CanAddQuest(LP, Quest) is true (the card's own gate).
+                -- Hunts are quest Category "BossHunt": one at a time, next to a Combat quest.
                 local hb = Tabs.Farm:AddLeftGroupbox('Boss Hunts')
-                hb:AddLabel('Board entries live in ReplicatedStorage.BossHunts.\nClaim = BossHuntsRequest{action="Claim", id} (the\nCrow board\'s own call). 1 hunt at a time.', true)
+                hb:AddLabel('Crow board hunts (ReplicatedStorage.BossHunts),\nmost EXP first. Claims only go out when the\ngame\'s own CanAddQuest check passes. A hunt is\nits own quest slot: it runs next to your quest.', true)
                 local hStatus = hb:AddLabel('')
                 hb:AddDropdown('SLHunt', { Values = {}, Default = nil, Multi = false, AllowNull = true, Text = 'Hunt' })
                 local byLabel = {}
+                local TIER_RANK = { Mythic = 6, Legendary = 5, Epic = 4, Rare = 3, UnCommon = 2, Common = 1 }
+                local pendingId, pendingAt, pendingBoss = nil, 0, nil -- last claim sent, until a hunt quest shows up
+                local failedIds = {} -- board ids whose claim produced no hunt quest (skipped while listed)
+                local function BHm() return S.req('CAM.Global.Subsets.Gameplay.Quests.BossHunts') end
+                local function QMh() return S.req('CAM.Global.Subsets.Gameplay.Quests') end
+                local function norm(s) return (tostring(s):lower():gsub('[^%w]', '')) end
+                local function fmtNum(n)
+                    n = tonumber(n) or 0
+                    if n >= 1e6 then return ('%.1fM'):format(n / 1e6) end
+                    if n >= 1e4 then return ('%.1fk'):format(n / 1e3) end
+                    return tostring(math.floor(n + 0.5))
+                end
+                local function sideOk(side) -- my race is listed in BossHunts.Sides[side].Race
+                    local BH = BHm()
+                    local def = BH and type(BH.Sides) == 'table' and side ~= nil and BH.Sides[side]
+                    local race = S.val(S.data(), 'Race')
+                    return type(def) == 'table' and type(def.Race) == 'table' and race ~= nil and table.find(def.Race, race) ~= nil
+                end
+                local function huntExp(h) -- EXP the claim pays (the board card's maths) + its BossHunts entry
+                    local BH, Q = BHm(), QMh()
+                    local entry, rew, factor = nil, nil, 1
+                    if BH and type(BH.Entry) == 'function' then
+                        local ok, e = pcall(BH.Entry, h.boss); if ok then entry = e end
+                    end
+                    if Q and type(Q.GetQuestInfo) == 'function' and h.quest then
+                        local ok, info = pcall(Q.GetQuestInfo, h.quest)
+                        if ok and type(info) == 'table' then rew = info.Rewards end
+                    end
+                    if type(rew) ~= 'table' and entry and type(BH.Rewards) == 'function' then
+                        local ok, r = pcall(BH.Rewards, entry); if ok then rew = r end
+                    end
+                    if entry and type(BH.Factor) == 'function' then
+                        local ok, f = pcall(BH.Factor, entry); if ok and type(f) == 'number' then factor = f end
+                    end
+                    return math.floor((type(rew) == 'table' and tonumber(rew.Exp) or 0) * factor + 0.5), entry
+                end
+                -- Quests.CanAddQuest(LP, Quest) (no cooldown skip), decoded like the Crow's
+                -- CrowTasks_Denied lines: true = claimable, anything else + the reason.
+                local function canClaim(h)
+                    local Q = QMh()
+                    if not h.quest then return nil, 'board entry has no Quest' end
+                    if not (Q and type(Q.CanAddQuest) == 'function' and type(Q.Holder) == 'table' and Q.Holder[h.quest] ~= nil) then
+                        return nil, 'hunt quest not registered on this client'
+                    end
+                    local ok, r, why, held = pcall(Q.CanAddQuest, LP, h.quest)
+                    if not ok then return nil, 'CanAddQuest failed' end
+                    if r == true then return true end
+                    if r == nil then return false, 'not your side / level band' end
+                    if why == 1 then return false, 'already holding it' end
+                    if why == 2 then return false, 'already done' end
+                    if why == false then return false, 'one hunt at a time - finish ' .. tostring(held or 'yours') .. ' first' end
+                    return false, 'quest cooldown (30s, shared with every quest)'
+                end
+                htrack({ Disconnect = function() S.huntMob, S.huntDrop = nil, nil end })
                 local function hunts()
                     local out = {}
                     local f = RepStorage:FindFirstChild('BossHunts')
@@ -2591,28 +5149,41 @@ if HUB_CURRENT ~= 'roguecopy' then
                     for _, h in ipairs(f:GetChildren()) do
                         local exp = h:GetAttribute('ExpiresAt')
                         if not exp or exp > now then
-                            out[#out + 1] = { id = h.Name, inst = h, boss = tostring(h:GetAttribute('Boss') or h.Name),
-                                tier = tonumber(h:GetAttribute('Tier')) or 0, side = h:GetAttribute('Side'),
-                                quest = h:GetAttribute('Quest'), left = exp and (exp - now) or nil }
+                            local boss, tier = tostring(h:GetAttribute('Boss') or h.Name), tostring(h:GetAttribute('Tier') or '?')
+                            local e = { id = h.Name, inst = h, boss = boss, tier = tier, side = h:GetAttribute('Side'),
+                                quest = h:GetAttribute('Quest'), left = exp and (exp - now) or nil, rank = TIER_RANK[tier] or 0 }
+                            e.xp, e.entry = huntExp(e)
+                            e.mine = sideOk(e.side)
+                            out[#out + 1] = e
                         end
                     end
-                    table.sort(out, function(a, b) return a.tier > b.tier end)
+                    -- your side first, then most EXP (tier breaks ties / covers a missing entry)
+                    table.sort(out, function(a, b)
+                        if a.mine ~= b.mine then return a.mine end
+                        if a.xp ~= b.xp then return a.xp > b.xp end
+                        return a.rank > b.rank
+                    end)
                     return out
                 end
                 local function refresh()
                     byLabel = {}
                     local labels = {}
                     for _, h in ipairs(hunts()) do
-                        local l = ('%s  T%d  [%s]%s'):format(h.boss, h.tier, tostring(h.side or '?'), h.left and ('  ' .. S.fmt(h.left)) or '')
+                        local l = ('%s  %s  %s exp  [%s%s]%s  #%s'):format(h.boss, h.tier, fmtNum(h.xp), tostring(h.side or '?'),
+                            h.mine and '' or ', not your side', h.left and ('  ' .. S.fmt(h.left)) or '', tostring(h.id))
                         byLabel[l] = h; labels[#labels + 1] = l
                     end
                     Options.SLHunt:SetValues(labels)
                     hStatus:SetText(('%d hunt(s) on the board'):format(#labels))
                 end
                 local function claim(h)
-                    if not h then return end
+                    if not h then return false end
+                    local ok, why = canClaim(h)
+                    if ok ~= true then S.setText(hStatus, ('Not claimed - %s: %s'):format(h.boss, tostring(why))); return false end
                     S.fire('BossHuntsRequest', { action = 'Claim', id = h.id })
-                    hStatus:SetText('Claim sent: ' .. h.boss .. ' T' .. h.tier)
+                    pendingId, pendingAt, pendingBoss = h.id, os.clock(), h.boss
+                    S.setText(hStatus, ('Claim sent: %s  %s  %s exp'):format(h.boss, h.tier, fmtNum(h.xp)))
+                    return true
                 end
                 hb:AddButton({ Text = 'Refresh', Func = refresh })
                     :AddButton({ Text = 'Claim selected', Func = function()
@@ -2621,32 +5192,127 @@ if HUB_CURRENT ~= 'roguecopy' then
                         claim(h)
                     end })
                 hb:AddToggle('SLAutoHunt', { Text = 'Auto-claim best hunt', Default = false,
-                    Tooltip = 'Every ~35s: if you have no hunt quest, claim the highest-tier hunt for your side (slayer/demon by race).' })
+                    Tooltip = 'When you hold no hunt: claims your side\'s hunt worth the most EXP (reward x group factor, Muzan = Demon/Hybrid, Crow = Slayer/Hybrid), only when the game\'s own Quests.CanAddQuest passes (level band, race, the shared 30s quest cooldown, one hunt at a time) and never while Auto quest is about to accept. A claim that gets no hunt quest within 8s is not retried for that hunt, and the next try backs off (1 min, doubling to 10 min).' })
+                hb:AddToggle('SLHuntPrefer', { Text = 'Farm prefers the hunted boss', Default = false,
+                    Tooltip = 'While you hold a hunt and its boss is alive and loaded (within ~600 studs), Mob farm / Auto quest farm go for it, then glide back to your farm spot. Gives up on that boss for 10 min if you die on it or it loses under 5% HP in 60s (e.g. a Lv 200 Mythic you can\'t kill).' })
+                local hHeld = hb:AddLabel('No hunt held', true)
                 local function hasHuntQuest(list)
+                    -- the BossHunt-category quest you hold (a claimed hunt needn't stay on the
+                    -- board): its Holder key, boss Npc name, BossHunts entry and quest folder
                     local slot = S.data()
                     local holder = slot and slot:FindFirstChild('Quests') and slot.Quests:FindFirstChild('Holder')
-                    if not holder then return false end
-                    for _, h in ipairs(list) do if h.quest and holder:FindFirstChild(tostring(h.quest)) then return true end end
-                    return false
+                    if not holder then return nil end
+                    local Q, BH = QMh(), BHm()
+                    for _, f in ipairs(holder:GetChildren()) do
+                        local qs = f:FindFirstChild('QuestString')
+                        local key = (qs and qs.Value ~= '' and qs.Value) or f.Name
+                        local cat
+                        if Q and type(Q.GetQuestCategory) == 'function' then
+                            local ok, c = pcall(Q.GetQuestCategory, key); if ok then cat = c end
+                        end
+                        -- unknown keys report 'Combat', so the key shape is the fallback
+                        if cat == 'BossHunt' or key:match('^Eliminate ') ~= nil then
+                            local boss, entry = key:match('^Eliminate (.+)$'), nil
+                            if boss and BH and type(BH.Entry) == 'function' then
+                                local ok, e = pcall(BH.Entry, boss); if ok then entry = e end
+                            end
+                            return key, boss, entry, f
+                        end
+                    end
+                    return nil
                 end
-                local function sideOk(side)
-                    if side == nil then return true end
-                    local slot = S.data()
-                    local race = tostring(S.val(slot, 'Race') or ''):lower()
-                    local s = tostring(side):lower()
-                    if race:find('hybrid') then return true end
-                    if s:find('demon') then return race:find('demon') ~= nil end
-                    if s:find('slayer') or s:find('human') then return race:find('demon') == nil end
-                    return true
+                -- Every second: (1) point the farm at the hunted boss while it is alive and
+                -- loaded (S.huntMob; Mob Farm's pick() prefers it), with a give-up guard,
+                -- (2) show the held hunt, (3) check the last claim took, (4) auto-claim.
+                local lastClaim, lastHeld, claimGap = 0, nil, 5
+                local skipUntil, skipWhy, chase = {}, {}, nil
+                local function huntTick()
+                    local now = os.clock()
+                    local key, boss, _, f = hasHuntQuest()
+                    local nb = boss and norm(boss)
+                    -- give-up guard 1: we died (or respawned) while the farm was on the boss
+                    local myHum = S.hum()
+                    if chase and (chase.nb ~= nb or LP.Character ~= chase.char or not (myHum and myHum.Health > 0)) then
+                        if chase.nb == nb then skipUntil[nb], skipWhy[nb] = now + 600, 'you died on it' end
+                        chase = nil
+                    end
+                    local want, seen
+                    if nb then
+                        local r = S.root()
+                        local farming = Toggles.SLMobFarm.Value or (Toggles.SLAutoQuest and Toggles.SLAutoQuest.Value)
+                        for _, m in ipairs(S.mobs()) do
+                            if norm(m.name) == nb then
+                                seen = m
+                                if Toggles.SLHuntPrefer.Value and farming and r and now >= (skipUntil[nb] or 0)
+                                    and (m.root.Position - r.Position).Magnitude <= 600 then want = m end
+                                break
+                            end
+                        end
+                    end
+                    -- give-up guard 2: under 5% of its HP gone in 60s of the farm being on it
+                    if want then
+                        local frac = want.hum.Health / math.max(want.hum.MaxHealth, 1)
+                        if not chase or chase.model ~= want.model or now - chase.last > 5 then
+                            chase = { nb = nb, model = want.model, char = LP.Character, hp = frac, at = now, last = now }
+                        else
+                            chase.last = now
+                            if frac > chase.hp or chase.hp - frac >= 0.05 then chase.hp, chase.at = frac, now end
+                            if now - chase.at > 60 then
+                                skipUntil[nb], skipWhy[nb] = now + 600, 'under 5% damage in 60s'
+                                want, chase = nil, nil
+                            end
+                        end
+                    end
+                    S.huntMob = want and want.name or nil
+                    -- a boss we gave up on: the farm drops it and won't re-pick it (unless
+                    -- Auto Quest's own quest is that boss - its stall timer handles that)
+                    local questOnIt = S.questMob ~= nil and norm(S.questMob) == nb
+                    S.huntDrop = (seen and now < (skipUntil[nb] or 0) and not questOnIt) and seen.model or nil
+                    local txt = 'No hunt held'
+                    if key then
+                        local prog, tl = {}, ''
+                        local tf = f and f:FindFirstChild('Tasks')
+                        for _, t in ipairs(tf and tf:GetChildren() or {}) do
+                            local v, mx = S.val(t, 'Value'), S.val(t, 'Max')
+                            if v and mx then prog[#prog + 1] = ('%d/%d'):format(v, mx) end
+                        end
+                        local tm = f and f:FindFirstChild('Timer')
+                        local st, tg = tonumber(S.val(tm, 'Started')), tonumber(S.val(tm, 'Target'))
+                        if st and tg and st > 0 then tl = '  ' .. S.fmt(st + tg - os.time()) .. ' left' end
+                        local state = want and 'farm is on it' or (seen and 'loaded' or 'not loaded')
+                        if nb and now < (skipUntil[nb] or 0) then
+                            state = ('farm skips it %s (%s)'):format(S.fmt(skipUntil[nb] - now), tostring(skipWhy[nb]))
+                        end
+                        txt = ('Hunting %s  %s%s  - %s'):format(tostring(boss or key), table.concat(prog, ', '), tl, state)
+                    end
+                    if txt ~= lastHeld then lastHeld = txt; S.setText(hHeld, txt) end
+                    -- a claim that produced no hunt quest in 8s was ignored: don't repeat it
+                    if key then
+                        claimGap, pendingId = 5, nil
+                    elseif pendingId and now - pendingAt > 8 then
+                        failedIds[pendingId] = true
+                        claimGap = math.min(math.max(claimGap, 30) * 2, 600)
+                        S.setText(hStatus, ('Claim for %s got no hunt quest (the server may want your Crow board open - summon the Crow once). Next auto-claim in %s'):format(
+                            tostring(pendingBoss), S.fmt(claimGap)))
+                        pendingId = nil
+                    end
+                    if key or pendingId or not Toggles.SLAutoHunt.Value or now - lastClaim < claimGap then return end
+                    -- never race Auto Quest's accept (both reset the shared 30s quest cooldown):
+                    -- claim only while it holds its quest, not while it heads to / waits at an NPC
+                    if S.farmPaused or S.questAcceptPending then return end
+                    for _, h in ipairs(hunts()) do
+                        if h.mine and not failedIds[h.id] and canClaim(h) == true then
+                            lastClaim = now
+                            claim(h)
+                            return
+                        end
+                    end
                 end
                 task.spawn(function()
                     while not S.dead do
-                        task.wait(35)
-                        if Toggles.SLAutoHunt and Toggles.SLAutoHunt.Value then
-                            local list = hunts()
-                            if not hasHuntQuest(list) then
-                                for _, h in ipairs(list) do if sideOk(h.side) then claim(h); break end end
-                            end
+                        task.wait(1)
+                        if not S.dead then
+                            if not pcall(huntTick) then S.huntMob, S.huntDrop = nil, nil end
                         end
                     end
                 end)
@@ -2727,12 +5393,21 @@ if HUB_CURRENT ~= 'roguecopy' then
                     if not ok then return (root.Position - wr.Position).Magnitude < 14 end
                     local m = Options.SLParryMargin.Value
                     local lp = cf:PointToObjectSpace(root.Position)
-                    -- vertically our body reaches legs-length below the root (same maths as
-                    -- the farm's head height, so sitting on a mob's head = out of reach)
-                    local myHum = S.hum()
-                    local legs = (myHum and myHum.HipHeight or 2) + root.Size.Y / 2
+                    -- Vertical: our feet (S.m1Legs(), the SAME number the farm's heightFor uses) vs
+                    -- the box top. For a mob that top is the higher of this swing's box and its real
+                    -- preset's worst combo (S.mobBoxTop). While the farm pins us on a mob there is no
+                    -- extra margin: the farm parks our feet S.FARM_CLEAR above exactly that top, so a
+                    -- swing that can't reach never stops M1 / holds block (the old +0.5 margin was
+                    -- bigger than the farm's 0.15 + 0.3 tweak clearance). Otherwise a small margin.
+                    local legs = S.m1Legs()
+                    local top = size.Y / 2
+                    local isMob = model:GetAttribute('IsMob') and true or false
+                    if isMob and S.mobBoxTop then
+                        top = math.max(top, S.mobBoxTop(model) - (cf.Position.Y - wr.Position.Y))
+                    end
+                    local tol = (isMob and S.farmLocked) and 0 or math.min(m, 0.5)
                     return math.abs(lp.X) <= size.X / 2 + m and math.abs(lp.Z) <= size.Z / 2 + m
-                        and lp.Y - legs <= size.Y / 2 + math.min(m, 0.5) and lp.Y + 2 >= -size.Y / 2 - m
+                        and lp.Y - legs <= top + tol and lp.Y + 2 >= -size.Y / 2 - m
                 end
                 local function dashOut()
                     if os.clock() - lastDash < 1 then return end
@@ -2742,6 +5417,11 @@ if HUB_CURRENT ~= 'roguecopy' then
                 end
                 -- The moment the block has to go out: re-validate, then block / dash.
                 local function fire(model, track, preset, combo, why)
+                    -- Kill Aura is holding a skill key: a block press (F = Skills_1st) goes through
+                    -- Attempt_Hold('Blocking'), which StopHolds a held skill it can't play over
+                    -- (Skill_Controller.lua:141-150) - wasting it, or (Flame Tiger under 0.3s)
+                    -- flipping it to its projectile branch. A dash would drag the skill's boxes.
+                    if S.kaCasting then return end
                     local farm = farmBlocking()
                     if not (Toggles.SLAutoParry.Value or farm) then return end
                     if S.farmLocked and not farm then return end
@@ -2754,6 +5434,21 @@ if HUB_CURRENT ~= 'roguecopy' then
                     local dash = (useless and fb ~= 'Never dash') or (noPerfect and fb == 'Dash if block useless or no perfect')
                     local myHum = S.hum()
                     local hp = myHum and myHum.Health
+                    -- On the farm the hop-out goes through S.farmDodge (= the farm's triggerDodge),
+                    -- which returns early while "Dodge mob skills" is off - that left the swing
+                    -- with neither a hop NOR a block. Then: no perfect possible -> block anyway (a
+                    -- chip block still beats a clean hit; the farm pins the root, so a real dash
+                    -- would do nothing); block useless (pierced / guard broken) -> leave it and keep
+                    -- M1 going, since blocking would only pause M1 for nothing (old behaviour).
+                    if dash and S.farmLocked and not (S.farmDodge and Toggles.SLFarmDodge and Toggles.SLFarmDodge.Value) then
+                        if useless then
+                            if Toggles.SLParryLog.Value then
+                                print(('[Parry] %s %s -> SKIP [block useless, farm dodge off] (M1 continues)'):format(model.Name, tostring(why)))
+                            end
+                            return
+                        end
+                        dash = false
+                    end
                     if dash then
                         if S.farmLocked and S.farmDodge then S.farmDodge(model, 'unblockable swing', 0, 0.45)
                         else dashOut() end
@@ -2885,8 +5580,18 @@ if HUB_CURRENT ~= 'roguecopy' then
                     htrack(debree.ChildAdded:Connect(function(f)
                         if not (Toggles.SLTeleDodge.Value and f.Name:match('%-Telegraph$')) then return end
                         task.delay(Options.SLDodgeDelay.Value, function()
-                            local root = S.root()
-                            if root and f.Parent and not f:GetAttribute('Cancelled') and inside(f, root.Position) then dash() end
+                            -- The shape plates come with a LATER phase call than the empty "Start"
+                            -- folder (Effects/Core/Telegraph.lua), so one look at +delay often saw no
+                            -- plate at all: keep looking for up to 1s. While the Mob farm has a target
+                            -- it hops out of telegraphs itself and re-pins the root every frame, so a
+                            -- dash here would only burn the dash.
+                            local t0 = os.clock()
+                            while not S.dead and f.Parent and not f:GetAttribute('Cancelled') and os.clock() - t0 < 1 do
+                                if S.farmHasTarget and Toggles.SLFarmDodge and Toggles.SLFarmDodge.Value then return end
+                                local root = S.root()
+                                if root and inside(f, root.Position) then dash(); return end
+                                RunService.Heartbeat:Wait()
+                            end
                         end)
                     end))
                 end)
@@ -2922,6 +5627,15 @@ if HUB_CURRENT ~= 'roguecopy' then
                 if PH and type(PH.mousepos) == 'function' then
                     local orig = PH.mousepos
                     PH.mousepos = function(a1, a2, a3)
+                        -- Kill Aura skill casts own the aim for their cast window: the point it
+                        -- scored (S.kaAim), with the same radius clamp as below.
+                        if S.kaAim and os.clock() < (S.kaAimUntil or 0) then
+                            local kaPos, r = S.kaAim, S.root()
+                            if a1 ~= nil and r and (kaPos - r.Position).Magnitude > a1 then
+                                kaPos = r.Position + (kaPos - r.Position).Unit * a1
+                            end
+                            return kaPos
+                        end
                         if Toggles.SLAim and Toggles.SLAim.Value and aimTarget and aimTarget.Parent then
                             local pos = aimTarget.Position
                             local r = S.root()
@@ -3000,6 +5714,12 @@ if HUB_CURRENT ~= 'roguecopy' then
                     local sel = Options.SLHitboxWeapon.Value
                     if who == LP and sel and sel ~= 'Current weapon' and CPm.Presets[sel] then return CPm.Presets[sel], sel end
                     local tool
+                    -- Shared S.m1Preset: mobs = NpcMimicFolder.Equipped_Tool, normalised (Cutlass ->
+                    -- Regular Katana...); CIP.Get_equipped_tool returns nil for every NPC.
+                    if S.m1Preset then
+                        local p, n = S.m1Preset(who)
+                        if p then return p, n end
+                    end
                     if CIP and CIP.Get_equipped_tool then
                         local ok, t = pcall(CIP.Get_equipped_tool, who)
                         if ok then tool = t end
@@ -3062,6 +5782,475 @@ if HUB_CURRENT ~= 'roguecopy' then
                     hideFrom(n + 1)
                 end))
                 htrack({ Disconnect = function() for _, a in pairs(pool) do pcall(a.Destroy, a) end end })
+            end)()
+
+            -- ================================================================
+            -- MOB MAGNET (experimental): park mobs WE network-own inside our M1 box
+            -- ================================================================
+            -- Hostile mobs are server-owned. In the decompiled server skill code only
+            -- four skills hand the CASTER network ownership of a mob's root, and none
+            -- of them ever takes it back:
+            --   Scyther Vortex (Sickles)         captureVictim -> root:SetNetworkOwner(caster)
+            --   War Gale Wind (War Fans)         captureVictim -> same
+            --   Rising Dust Storm (Wind, V1+V2)  captureVictim -> same
+            --   Obi Charge (Obi Manipulation)    carry grab    -> same
+            -- The only visible resets are the mob's own NpcConfig.Signals.TouchedWater
+            -- (SetNetworkOwner(nil) + MoveTo its spawn) and death (a fresh model).
+            -- Release runs Combat_Util.RagDoll / Knockback, which live in ServerStorage
+            -- (not in the dump) and MAY take ownership back - hence "Probe only".
+            -- The server M1 box takes every model with a DIRECT child part inside it
+            -- (Get_Players_For_Combat -> Utility.GetModelInRegion), so an owned mob can
+            -- be parked in our box: under our feet, at a depth where our box still
+            -- reaches its top but ITS box (worst combo) stays below our feet. A mob
+            -- with no such depth is left alone. No remotes are fired, but the CFrames
+            -- we write replicate to the server (that is the point) and to every player.
+            -- isnetworkowner is re-checked every frame; a mob we stop owning is never
+            -- touched again. Heartbeat is only connected while the toggle is on.
+            ;(function()
+                local box = Tabs.Farm:AddRightGroupbox('Mob Magnet')
+                box:AddLabel('Only moves mobs YOUR client network-owns. That\nhappens after you catch them with Scyther Vortex,\nWar Gale Wind, Rising Dust Storm or Obi Charge -\nwithout one of those it stays at 0 and does nothing.', true)
+                local status = box:AddLabel('owned mobs: -', true)
+                box:AddToggle('SLMagnet', { Text = 'Mob magnet (experimental)', Default = false,
+                    Tooltip = 'EXPERIMENTAL. Owned mobs near you (isnetworkowner) are parked just under your feet inside your M1 box, at a depth where your box still reaches them but theirs (worst combo) cannot reach you; a mob with no such spot is left alone. One M1 then hits all of them. Only Scyther Vortex, War Gale Wind, Rising Dust Storm and Obi Charge ever give you a mob - otherwise nothing happens. No remotes are fired, but the positions you set replicate to the server (and every player) through network ownership: anyone watching sees mobs glued under you.' })
+                box:AddToggle('SLMagProbe', { Text = 'Probe only (move nothing)', Default = true,
+                    Tooltip = 'Counts owned mobs and shows what the magnet WOULD do, without moving anything. Check this first: catch mobs with your capture skill and watch "owned" after they are released and after your first M1 lands. The release ragdoll / knockback code is server-only and may take ownership back - if the count drops to 0, the magnet can never do anything for you. Untick to let it move mobs.' })
+                box:AddToggle('SLMagFarmOnly', { Text = 'Only while Mob Farm is locked on', Default = true,
+                    Tooltip = 'Only works while Mob Farm / Auto Quest sits on its target (that is what keeps you above the mobs). Off = also while you play normally, which drags owned mobs along with you - the most visible use, with no farm benefit.' })
+                box:AddSlider('SLMagRadius', { Text = 'Magnet radius', Default = 30, Min = 8, Max = 80, Rounding = 0, Suffix = ' studs',
+                    Tooltip = 'Owned mobs within this distance of you get pulled in. A mob is never dragged more than 100 studs from where it was first pulled.' })
+                box:AddSlider('SLMagMax', { Text = 'Max mobs stacked', Default = 4, Min = 1, Max = 8, Rounding = 0,
+                    Tooltip = 'Slots in your M1 box (small offsets so they don\'t sit inside each other).' })
+                box:AddSlider('SLMagSpeed', { Text = 'Pull speed', Default = 60, Min = 20, Max = 300, Rounding = 0, Suffix = ' studs/s',
+                    Tooltip = 'Owned mobs glide to their slot at this speed. Mobs run at 25 studs/s (NpcConfig Spawning RunSpeed), so much more than that reads as a snap to anyone watching.' })
+                box:AddSlider('SLMagPlayers', { Text = 'Pause if a player is within', Default = 100, Min = 0, Max = 300, Rounding = 0, Suffix = ' studs',
+                    Tooltip = 'Moves nothing while another player is this close (they would see it). 0 = never pause. Mobs another player is fighting (their NpcsFollowing) are never moved.' })
+                box:AddToggle('SLMagBosses', { Text = 'Also move bosses', Default = false,
+                    Tooltip = 'A boss glued under you is the most visible thing this can do. Off = bosses are never moved.' })
+                box:AddLabel('Waits while a mob is in the vortex, carried, knocked\nback or ragdolled; holds counter-armed / perfect-\nblocking mobs just outside your box; pauses while\nthe farm travels or dodges. Parked mobs feed the\nfarm\'s skill dodge. Never parks a mob on water.', true)
+                local isOwner = isnetworkowner or is_network_owner
+                if not isOwner then box:AddLabel('Executor lacks isnetworkowner - magnet disabled.', true) end
+                local function owns(part)
+                    local ok, r = pcall(isOwner, part)
+                    return ok and r == true and not part.Anchored
+                end
+
+                local CPm = S.req('CAM.Global.Combat_presets')
+                local P = CPm and type(CPm.Presets) == 'table' and CPm.Presets or nil
+                local Items -- CAM.Global.Collectibles.Items (false = failed to load)
+                local SF    -- CAM.Global.Subsets.Gameplay.StatsFetch (loaded on first enable; false = failed)
+                -- A mob's M1 preset: AiPrerequistes.NpcMimicFolder.Equipped_Tool (AiMimic),
+                -- else that item's CombatPreset, else Regular Katana / Combat.
+                local function mobPreset(model)
+                    if not P then return nil end
+                    local v = S.val(model, 'AiPrerequistes', 'NpcMimicFolder', 'Equipped_Tool')
+                    if type(v) ~= 'string' or v == '' then return P.Combat end
+                    if P[v] then return P[v] end
+                    if Items == nil then Items = S.req('CAM.Global.Collectibles.Items') or false end
+                    local it = type(Items) == 'table' and Items[v]
+                    local cp = type(it) == 'table' and it.CombatPreset
+                    return (cp and P[cp]) or P['Regular Katana'] or P.Combat
+                end
+                -- Largest value a per-combo preset table can give (HandDemon Widths
+                -- {Default=10,[3]=12}). A combo with no entry and no Default uses 0.
+                local function tmax(t)
+                    if type(t) ~= 'table' then return 0 end
+                    local m = (t.Default == nil) and 0 or nil
+                    for _, v in pairs(t) do
+                        if type(v) == 'number' and (m == nil or v > m) then m = v end
+                    end
+                    return m or 0
+                end
+                -- Extent of a model's DIRECT child parts in its root's frame (GetModelInRegion
+                -- keeps a part only when its Parent is the Model - accessory handles never
+                -- count): top = highest point, feet = lowest point below the root,
+                -- rad = horizontal half-diagonal of its footprint.
+                local function measure(model, r)
+                    local top, feet, ax, az
+                    local rcf = r.CFrame
+                    for _, p in ipairs(model:GetChildren()) do
+                        if p:IsA('BasePart') then
+                            local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = rcf:ToObjectSpace(p.CFrame):GetComponents()
+                            local sz = p.Size
+                            local hx = (math.abs(r00) * sz.X + math.abs(r01) * sz.Y + math.abs(r02) * sz.Z) / 2
+                            local hy = (math.abs(r10) * sz.X + math.abs(r11) * sz.Y + math.abs(r12) * sz.Z) / 2
+                            local hz = (math.abs(r20) * sz.X + math.abs(r21) * sz.Y + math.abs(r22) * sz.Z) / 2
+                            top = math.max(top or -1e9, y + hy)
+                            feet = math.max(feet or -1e9, hy - y)
+                            ax = math.max(ax or 0, math.abs(x) + hx)
+                            az = math.max(az or 0, math.abs(z) + hz)
+                        end
+                    end
+                    return top, feet, ax and math.sqrt(ax * ax + az * az)
+                end
+                -- Ragdolled = RagdollHandler's state (Humanoid Physics) or any ragdoll
+                -- RigidJoint with Part1 cleared (RagdollHandler.setRagdollEnabled). Scyther
+                -- Vortex ragdolls every victim for BURST_STUN 1.3s as it lets go.
+                local PHYSICS = Enum.HumanoidStateType.Physics
+                local function ragdolled(model, hum)
+                    if hum.PlatformStand or hum:GetState() == PHYSICS then return true end
+                    local rc = model:FindFirstChild('RagdollConstraints')
+                    if rc then
+                        for _, c in ipairs(rc:GetChildren()) do
+                            local j = c:FindFirstChild('RigidJoint')
+                            local jv = j and j:IsA('ObjectValue') and j.Value
+                            if jv and jv:IsA('JointInstance') and jv.Part1 == nil then return true end
+                        end
+                    end
+                    return false
+                end
+                -- Per-model shape, measured once the rig is intact (callers check ragdolled
+                -- first) and cached for the model's life. reach = top of ITS M1 box vs its
+                -- root: centre -1 + YOffsets, height 6.25 + Widths, max over every combo,
+                -- no NPC shrink (worst case, same rule as the farm's Auto height).
+                local shapes = setmetatable({}, { __mode = 'k' })
+                local function shapeOf(model, r)
+                    local s = shapes[model]
+                    if s then return s end
+                    local top, feet, rad = measure(model, r)
+                    if not top then return nil end
+                    local preset = mobPreset(model)
+                    s = {
+                        top = math.clamp(top, 0.5, 30), feet = math.clamp(feet, 0.5, 30), rad = math.clamp(rad, 1, 20),
+                        reach = -1 + tmax(preset and preset.YOffsets) + (6.25 + tmax(preset and preset.Widths)) / 2,
+                    }
+                    shapes[model] = s
+                    return s
+                end
+
+                local cands, seen, slotOf, slotUsed, holding, others = {}, {}, {}, {}, {}, {}
+                local origin = setmetatable({}, { __mode = 'k' }) -- where we first moved each mob from (leash)
+                -- Camps reset mobs past Spawning.DespawnDistance (150 default, 250+ on the
+                -- live camps) from their Center: 100 stays inside both.
+                local LEASH = 100
+                -- Slots {sideways, forward} studs from our root, clamped into the part of
+                -- the box that EVERY combo covers, and >= 2 studs off the column under
+                -- us, where the Mob Farm's own target stands.
+                local SLOTS = { { 0, 2.4 }, { 1.9, 1.7 }, { -1.9, 1.7 }, { 0.9, 3.4 }, { -0.9, 3.4 }, { 2, -0.8 }, { -2, -0.8 }, { 0, -2 } }
+                local DOWN = Vector3.new(0, -80, 0)
+                local floorRp = RaycastParams.new()
+                floorRp.FilterType = Enum.RaycastFilterType.Exclude
+                floorRp.IgnoreWater = false -- a Terrain water surface counts as water, not floor
+                local waterRp = RaycastParams.new()
+                waterRp.FilterType = Enum.RaycastFilterType.Include
+                pcall(function() waterRp.BruteForceAllSlow = true end) -- same query the fishing rod uses for SwimParts
+                local F = { carried = {} } -- per-frame geometry shared by the helpers below
+                local ourPreset, ownedAll, myFeet, hasWater, nearPlayer = nil, 0, 3, false, nil
+                local lastScan, lastLbl, lastText, lastErr = 0, 0, '', nil
+                local function scan(root, hum)
+                    table.clear(cands)
+                    local rootPos = root.Position
+                    -- Other players: never touch a mob they are fighting (the server's
+                    -- NpcsFollowing ObjectValues, Following.Set), and pause while one is close.
+                    table.clear(others)
+                    local near, lim = nil, Options.SLMagPlayers.Value
+                    local ex, water = {}, {}
+                    if LP.Character then ex[1] = LP.Character end
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        local ch = p ~= LP and p.Character
+                        if ch then
+                            ex[#ex + 1] = ch
+                            local f = ch:FindFirstChild('NpcsFollowing')
+                            if f then
+                                for _, v in ipairs(f:GetChildren()) do
+                                    if v:IsA('ObjectValue') and v.Value then others[v.Value] = true end
+                                end
+                            end
+                            local pr = ch:FindFirstChild('HumanoidRootPart')
+                            local d = pr and (pr.Position - rootPos).Magnitude
+                            if d and lim > 0 and d <= lim and (not near or d < near) then near = d end
+                        end
+                    end
+                    nearPlayer = near and math.floor(near + 0.5) or nil
+                    local rad = Options.SLMagRadius.Value
+                    local skipCiv = Toggles.SLFarmSkipCiv and Toggles.SLFarmSkipCiv.Value
+                    local n = 0
+                    for _, m in ipairs(S.mobs()) do
+                        if m.model ~= LP.Character and Players:GetPlayerFromCharacter(m.model) == nil then
+                            if owns(m.root) then
+                                n = n + 1
+                                if (m.root.Position - rootPos).Magnitude <= rad and not others[m.model]
+                                    and not (m.boss and not Toggles.SLMagBosses.Value) and not (m.civ and skipCiv) then
+                                    cands[#cands + 1] = m
+                                end
+                            else
+                                origin[m.model] = nil -- not ours (any more): the next grab starts a fresh leash
+                            end
+                        end
+                    end
+                    ownedAll = n
+                    ourPreset = S.swingPreset(LP, nil)
+                    -- our lowest direct-child part vs our root (what a mob's box must stay under)
+                    local _, f = measure(LP.Character, root)
+                    myFeet = math.max(f or 3, hum.HipHeight + root.Size.Y / 2)
+                    -- Water = the SwimParts TouchParts + their sibling Texture (Swimming.lua
+                    -- getTexture). Floor rays pass through them; water rays hit only them.
+                    for _, nm in ipairs({ 'Humanoids', 'Debree' }) do
+                        local fo = workspace:FindFirstChild(nm); if fo then ex[#ex + 1] = fo end
+                    end
+                    for _, v in ipairs(CS:GetTagged('SwimParts')) do
+                        water[#water + 1] = v; ex[#ex + 1] = v
+                        local tex = v.Parent and v.Parent:FindFirstChild('Texture')
+                        if tex then water[#water + 1] = tex; ex[#ex + 1] = tex end
+                    end
+                    floorRp.FilterDescendantsInstances = ex
+                    waterRp.FilterDescendantsInstances = water
+                    hasWater = #water > 0
+                end
+                -- Our box for every combo 1..7 (S.m1Box = Get_Players_For_Combat), in combo
+                -- 1's box space (all share one orientation): the INTERSECTION is where a
+                -- parked mob is hit whatever combo we are on; the UNION is what a held-out
+                -- mob must stay clear of; bottom = highest box bottom vs our root (least reach).
+                local function frameGeometry(root)
+                    local ok1, cf1 = pcall(S.m1Box, root, ourPreset, 1, false)
+                    if not ok1 then return false end
+                    local rootY = root.Position.Y
+                    local ix0, ix1, iz0, iz1 = -1e9, 1e9, -1e9, 1e9
+                    local ux, uz0, uz1, bottom = 0, 1e9, -1e9, -1e9
+                    for i = 1, 7 do
+                        local ok, cf, size = pcall(S.m1Box, root, ourPreset, i, false)
+                        if ok then
+                            local c = cf1:PointToObjectSpace(cf.Position)
+                            local hx, hz = size.X / 2, size.Z / 2
+                            ix0, ix1 = math.max(ix0, c.X - hx), math.min(ix1, c.X + hx)
+                            iz0, iz1 = math.max(iz0, c.Z - hz), math.min(iz1, c.Z + hz)
+                            ux = math.max(ux, math.abs(c.X) + hx)
+                            uz0, uz1 = math.min(uz0, c.Z - hz), math.max(uz1, c.Z + hz)
+                            bottom = math.max(bottom, cf.Position.Y - size.Y / 2 - rootY)
+                        end
+                    end
+                    F.boxCf, F.rootLocal = cf1, cf1:PointToObjectSpace(root.Position)
+                    F.ix0, F.ix1, F.iz0, F.iz1 = ix0, ix1, iz0, iz1
+                    F.ux, F.uz0, F.uz1, F.bottom = ux, uz0, uz1, bottom
+                    -- Carried mobs: Utility.CreateOuwWeld is an ObjectValue(victim root) on the
+                    -- CARRIER's root, tagged OuwWeld a frame later (task.defer) - Obi Charge,
+                    -- Execution Scyther, Storm Piercer... by us or by anyone else.
+                    local carried = F.carried
+                    table.clear(carried)
+                    for _, c in ipairs(root:GetChildren()) do
+                        if c:IsA('ObjectValue') and c.Value then carried[c.Value] = true end
+                    end
+                    for _, c in ipairs(CS:GetTagged('OuwWeld')) do
+                        if c:IsA('ObjectValue') and c.Value then carried[c.Value] = true end
+                    end
+                    return true
+                end
+                local function clampS(v, a, b) -- math.clamp that tolerates an empty range
+                    if a > b then return (a + b) / 2 end
+                    return math.clamp(v, a, b)
+                end
+                -- Height for a mob's root at (x, z): never into the floor; nil = water there
+                -- (touching water fires the mob's TouchedWater: ownership reset + walk home).
+                local function settle(x, z, y, feet)
+                    local from = Vector3.new(x, math.max(F.rootPos.Y, y) + 2, z)
+                    local fl = workspace:Raycast(from, DOWN, floorRp)
+                    if fl and fl.Material == Enum.Material.Water then return nil end -- Terrain water
+                    if hasWater then -- a SwimParts surface above the ground here (not under a bridge)
+                        local w = workspace:Raycast(from, DOWN, waterRp)
+                        if w and (not fl or w.Position.Y >= fl.Position.Y - 0.5) then return nil end
+                    end
+                    if fl then y = math.max(y, fl.Position.Y + feet) end
+                    return y
+                end
+                local function freeSlot(model)
+                    local i = slotOf[model]
+                    if i then slotUsed[i] = nil; slotOf[model] = nil end
+                end
+                local function takeSlot(model, maxN)
+                    local i = slotOf[model]
+                    if i and i <= maxN then return i end
+                    freeSlot(model)
+                    for k = 1, math.min(maxN, #SLOTS) do
+                        if not slotUsed[k] then slotUsed[k] = model; slotOf[model] = k; return k end
+                    end
+                    return nil
+                end
+                -- The game is moving it: carried, in the vortex, welded, knocked back or
+                -- ragdolled. Hands off until that ends.
+                local function handsOff(model, mr, hum)
+                    if F.carried[mr] or mr:FindFirstChild('ALP') then return true end
+                    local ar = mr.AssemblyRootPart
+                    if ar and ar ~= mr and not ar:IsDescendantOf(model) then return true end
+                    for _, c in ipairs(mr:GetChildren()) do
+                        if c:IsA('BodyMover') or c:IsA('LinearVelocity') or c:IsA('AlignPosition') or c:IsA('VectorForce') then return true end
+                    end
+                    return ragdolled(model, hum)
+                end
+                -- Hitting it would backfire (Checker.check_victim, M1 from a player):
+                -- NpcCounter 1/2, a Counter / SHC(S) counter of type 1/2 (StatsFetch.
+                -- GetCounter; Record = M1s pass), or a Perfect block without PierceBlock.
+                local function risky(model)
+                    local nc = model:GetAttribute('NpcCounter')
+                    if nc == 1 or nc == 2 then return true end
+                    local ok, ty, _, obj = false, nil, nil, nil
+                    if SF and SF.GetCounter then ok, ty, _, obj = pcall(SF.GetCounter, model, model) end
+                    if not ok then -- no StatsFetch: its Counter StringValue branch by hand
+                        local cv = model:FindFirstChild('Counter')
+                        ty, obj = nil, nil
+                        if cv and cv:IsA('StringValue') and cv.Value ~= '' then ty, obj = cv:GetAttribute('Type'), cv end
+                    end
+                    if (ty == 1 or ty == 2) and not (typeof(obj) == 'Instance' and obj:GetAttribute('Record') == true) then return true end
+                    local b = model:FindFirstChild('Blocking')
+                    return b ~= nil and b:FindFirstChild('Perfect') ~= nil and model:FindFirstChild('PierceBlock') == nil
+                end
+                -- Glide toward `want` (leash from the first pull; the in-between spot is
+                -- floor-clamped and never on water). Returns 'ok' | 'leash' | 'water'.
+                local function moveTo(model, mr, want, feet, away)
+                    local o = origin[model]
+                    if not o then o = mr.Position; origin[model] = o end
+                    if (want - o).Magnitude > LEASH then return 'leash' end
+                    if F.dry then return 'ok' end
+                    if S.farmHookMob then pcall(S.farmHookMob, model) end -- the farm's skill dodge watches it too
+                    local mpos = mr.Position
+                    local delta = want - mpos
+                    local stepMax = Options.SLMagSpeed.Value * F.dt
+                    local pos = want
+                    if delta.Magnitude > stepMax then
+                        pos = mpos + delta.Unit * stepMax
+                        local y = settle(pos.X, pos.Z, pos.Y, feet)
+                        if not y then return 'water' end
+                        pos = Vector3.new(pos.X, y, pos.Z)
+                    end
+                    local flat = Vector3.new(pos.X - F.rootPos.X, 0, pos.Z - F.rootPos.Z)
+                    if flat.Magnitude < 0.2 then flat = F.boxCf.LookVector end
+                    flat = flat.Unit
+                    mr.CFrame = CFrame.lookAt(pos, away and (pos + flat) or (pos - flat)) -- faces us (held out: away)
+                    mr.AssemblyLinearVelocity = Vector3.zero
+                    mr.AssemblyAngularVelocity = Vector3.zero
+                    return 'ok'
+                end
+                -- One owned, in-range mob that is not the farm's target.
+                -- Returns 'slot' | 'hold' | 'wait' | 'unsafe' | nil (all slots taken).
+                local function handle(model, mr, hum, maxN)
+                    if handsOff(model, mr, hum) then return 'wait' end
+                    local sh = shapeOf(model, mr)
+                    if not sh then return 'wait' end
+                    local lo = sh.reach + myFeet + 0.15 -- depth where ITS box top clears our feet
+                    local hi = sh.top - 0.3 - F.bottom  -- depth where OUR box bottom still reaches its top
+                    if risky(model) then
+                        -- Hold it just outside every combo's box, at the safe depth, facing
+                        -- away, until the counter / perfect block clears.
+                        freeSlot(model)
+                        local ml = F.boxCf:PointToObjectSpace(mr.Position)
+                        local near = holding[model] or (math.abs(ml.X) < F.ux + sh.rad + 1
+                            and ml.Z > F.uz0 - sh.rad - 1 and ml.Z < F.uz1 + sh.rad + 1)
+                        if not near then return 'wait' end -- already well outside our box
+                        local side = (ml.X >= 0) and 1 or -1
+                        local p = F.boxCf * Vector3.new(side * (F.ux + sh.rad + 1.5), 0, clampS(ml.Z, F.uz0, F.uz1))
+                        local y = settle(p.X, p.Z, F.rootPos.Y - (lo + 0.3), sh.feet)
+                        if not y then return 'unsafe' end
+                        local r = moveTo(model, mr, Vector3.new(p.X, y, p.Z), sh.feet, true)
+                        if r == 'water' then return 'unsafe' elseif r ~= 'ok' then return 'wait' end
+                        holding[model] = true
+                        seen[model] = 'hold'
+                        return 'hold'
+                    end
+                    holding[model] = nil
+                    if lo > hi then return 'unsafe' end -- no depth where we reach it and it can't reach us
+                    local k = takeSlot(model, maxN)
+                    if not k then return nil end
+                    local sl = SLOTS[k]
+                    local p = F.boxCf * Vector3.new(clampS(sl[1], F.ix0 + 0.5, F.ix1 - 0.5), 0,
+                        clampS(F.rootLocal.Z - sl[2], F.iz0 + 0.5, F.iz1 - 0.5))
+                    local y = settle(p.X, p.Z, F.rootPos.Y - math.min(lo + 0.3, hi), sh.feet)
+                    -- the floor lifted it back into reach (standing on the ground, a taller
+                    -- mob than the target, a crate under the slot...): leave it alone
+                    if not y or F.rootPos.Y - y < sh.reach + myFeet + 0.05 then freeSlot(model); return 'unsafe' end
+                    local r = moveTo(model, mr, Vector3.new(p.X, y, p.Z), sh.feet, false)
+                    if r ~= 'ok' then freeSlot(model); return (r == 'water') and 'unsafe' or 'wait' end
+                    seen[model] = 'slot'
+                    return 'slot'
+                end
+                local function step(dt)
+                    if S.dead then return end
+                    local root, hum = S.root(), S.hum()
+                    if not (root and hum and hum.Health > 0) then return end
+                    local now = os.clock()
+                    if now - lastScan > 0.25 then lastScan = now; scan(root, hum) end
+                    -- Mob Farm / Auto Quest travelling, dodging or paused: leave the mobs be
+                    -- (dragging a mob into our dodge spot drags its skill hitbox with it).
+                    local farmOn = (Toggles.SLMobFarm and Toggles.SLMobFarm.Value) or (Toggles.SLAutoQuest and Toggles.SLAutoQuest.Value)
+                    local why
+                    if Toggles.SLMagFarmOnly.Value and not farmOn then why = 'farm off'
+                    elseif farmOn and (S.farmPaused or not S.farmLocked) then why = 'farm not locked on'
+                    elseif nearPlayer then why = ('player %d studs away'):format(nearPlayer) end
+                    F.dry, F.dt, F.rootPos = Toggles.SLMagProbe.Value, dt, root.Position
+                    local rootPos = F.rootPos
+                    table.clear(seen)
+                    local parked, held, waiting, unsafe = 0, 0, 0, 0
+                    local rad, maxN = Options.SLMagRadius.Value + 4, Options.SLMagMax.Value
+                    -- the farm's live target (Heartbeat runs after its RenderStepped): the farm
+                    -- sits on it, so moving it too = the two chase each other. No getter =
+                    -- the mob right under us while locked.
+                    local tgt = S.farmGetTarget and S.farmGetTarget()
+                    local geo = false
+                    for _, m in ipairs(cands) do
+                        local model, mr = m.model, m.root
+                        if model.Parent and mr.Parent and m.hum.Health > 0 and (mr.Position - rootPos).Magnitude <= rad then
+                            if not owns(mr) then
+                                origin[model] = nil -- ownership lost: never touched again until re-grabbed
+                            elseif why then
+                                if slotOf[model] then seen[model] = 'slot' end
+                                if holding[model] then seen[model] = 'hold' end
+                            else
+                                local mpos = mr.Position
+                                local flatD = Vector3.new(mpos.X - rootPos.X, 0, mpos.Z - rootPos.Z).Magnitude
+                                local isTarget = (tgt ~= nil and model == tgt)
+                                    or (S.farmGetTarget == nil and S.farmLocked and flatD < 1.2 and mpos.Y < rootPos.Y)
+                                if not isTarget then
+                                    if not geo then -- geometry once per frame, only when something is ours
+                                        geo = frameGeometry(root)
+                                        if not geo then break end
+                                    end
+                                    local r = handle(model, mr, m.hum, maxN)
+                                    if r == 'slot' then parked = parked + 1
+                                    elseif r == 'hold' then held = held + 1
+                                    elseif r == 'wait' then waiting = waiting + 1
+                                    elseif r == 'unsafe' then unsafe = unsafe + 1 end
+                                end
+                            end
+                        end
+                    end
+                    for model in pairs(slotOf) do
+                        if seen[model] ~= 'slot' then freeSlot(model) end -- lost / busy / risky / died / out of range
+                    end
+                    for model in pairs(holding) do
+                        if seen[model] ~= 'hold' then holding[model] = nil end
+                    end
+                    if now - lastLbl > 0.3 then
+                        lastLbl = now
+                        local t = ('owned mobs: %d'):format(ownedAll)
+                        if parked > 0 then t = t .. (F.dry and '  |  would park: %d' or '  |  in box: %d'):format(parked) end
+                        if held > 0 then t = t .. (F.dry and '  |  would hold out: %d' or '  |  held out: %d'):format(held) end
+                        if waiting > 0 then t = t .. ('  |  waiting: %d'):format(waiting) end
+                        if unsafe > 0 then t = t .. ('  |  no safe spot: %d'):format(unsafe) end
+                        if why and ownedAll > 0 then t = t .. ('  (paused: %s)'):format(why) end
+                        if F.dry then t = t .. '  [probe: nothing moved]' end
+                        if t ~= lastText then lastText = t; S.setText(status, t) end
+                    end
+                end
+                local conn
+                local function stop()
+                    if conn then conn:Disconnect(); conn = nil end
+                    table.clear(cands); table.clear(seen); table.clear(slotOf); table.clear(slotUsed)
+                    table.clear(holding); table.clear(others); table.clear(origin); table.clear(F.carried)
+                    ownedAll, nearPlayer, lastText, lastErr = 0, nil, '', nil
+                    S.setText(status, 'owned mobs: -')
+                end
+                Toggles.SLMagnet:OnChanged(function()
+                    if not Toggles.SLMagnet.Value or S.dead then stop(); return end
+                    if not isOwner then Library:Notify('Mob magnet: this executor has no isnetworkowner - nothing to do', 4); return end
+                    if conn then return end
+                    if SF == nil then SF = S.req('CAM.Global.Subsets.Gameplay.StatsFetch') or false end
+                    lastScan = 0
+                    conn = RunService.Heartbeat:Connect(function(dt)
+                        local ok, err = pcall(step, dt)
+                        if not ok and err ~= lastErr then
+                            lastErr, lastText = err, ''
+                            S.setText(status, 'magnet error: ' .. tostring(err))
+                        end
+                    end)
+                end)
+                htrack({ Disconnect = stop })
             end)()
 
             -- ================================================================

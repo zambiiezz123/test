@@ -54,15 +54,64 @@ do
         -- Slayers: place ids from ReplicatedStorage.CAM.Worlds (Ouwland main world,
         -- Main Menu, Minigames). Add its GameId (universe) here once known.
         { key = 'slayers',          ids = { 136406881576517, 16205713724, 75556147183481 } },
+        -- PracticalBB (basketball, Aero framework): GameId 7529591378 is the UNIVERSE
+        -- (matches every place); places = Plaza, Private Gym, Park.
+        { key = 'practicalbb',      ids = { 7529591378, 115776365257536, 119587547774646, 118669925076970 } },
     }
     local pid, uid = game.PlaceId, game.GameId
-    for _, g in ipairs(HUB_GAMES) do
-        for _, id in ipairs(g.ids) do
-            if pid == id or uid == id then HUB_CURRENT = g.key; break end
+    local how = 'id'
+    -- Manual override: getgenv().GameHub_Force = 'slayers' before running.
+    local forced = getgenv().GameHub_Force
+    if type(forced) == 'string' and forced ~= '' then HUB_CURRENT, how = forced, 'forced' end
+    if HUB_CURRENT == 'unknown' then
+        for _, g in ipairs(HUB_GAMES) do
+            for _, id in ipairs(g.ids) do
+                if pid == id or uid == id then HUB_CURRENT = g.key; break end
+            end
+            if HUB_CURRENT ~= 'unknown' then break end
         end
-        if HUB_CURRENT ~= 'unknown' then break end
     end
-    print(('[Hub] PlaceId=%d GameId(universe)=%d -> module: %s'):format(pid, uid, HUB_CURRENT))
+    -- Fingerprints: no ids needed. Each game is recognised by the structure its
+    -- own framework ships (read-only FindFirstChild), so new places, new servers
+    -- and copies of these games are picked up automatically.
+    if HUB_CURRENT == 'unknown' then
+        how = 'fingerprint'
+        local RS = game:GetService('ReplicatedStorage')
+        local function has(root, ...)
+            local node = root
+            for _, n in ipairs({ ... }) do
+                node = node and node:FindFirstChild(n)
+                if not node then return false end
+            end
+            return true
+        end
+        local PRINTS = {
+            -- Aero framework + the shot meter service
+            { key = 'practicalbb', test = function() return has(RS, 'Aero', 'AeroRemoteServices', 'MeterService') end },
+            -- CAM framework + replicated per-player data
+            { key = 'slayers', test = function() return has(RS, 'CAM', 'Global') and (has(RS, 'Player_Service') or has(RS, 'RemotePlus')) end },
+            -- turn-based combat remotes
+            { key = 'forgottenstories', test = function() return has(RS, 'Remotes', 'ActionClient') and has(RS, 'Remotes', 'QteResult') end },
+            -- Rogue Lineage: Requests remotes + its area markers / fake leaderstats
+            { key = 'roguecopy', test = function()
+                return has(RS, 'Requests') and (has(workspace, 'AreaMarkers')
+                    or has(game:GetService('Players').LocalPlayer, 'leaderstatsfake'))
+            end },
+        }
+        -- Auto-execute can run before the game finishes replicating: give it up to 10s.
+        if not game:IsLoaded() then pcall(function() game.Loaded:Wait() end) end
+        local t0 = os.clock()
+        repeat
+            for _, p in ipairs(PRINTS) do
+                local ok, hit = pcall(p.test)
+                if ok and hit then HUB_CURRENT = p.key; break end
+            end
+            if HUB_CURRENT ~= 'unknown' then break end
+            task.wait(0.5)
+        until os.clock() - t0 > 10
+        if HUB_CURRENT == 'unknown' then how = 'none' end
+    end
+    print(('[Hub] PlaceId=%d GameId(universe)=%d -> module: %s (matched by %s)'):format(pid, uid, HUB_CURRENT, how))
 end
 
 -- Non-roguecopy games build their OWN self-contained menu here and RETURN, so
@@ -78,6 +127,7 @@ if HUB_CURRENT ~= 'roguecopy' then
     local Window = Library:CreateWindow({
         Title = (HUB_CURRENT == 'forgottenstories') and 'Game Hub - Forgotten Stories'
             or (HUB_CURRENT == 'slayers') and 'Game Hub - Slayers'
+            or (HUB_CURRENT == 'practicalbb') and 'Game Hub - PracticalBB'
             or 'Game Hub - Universal',
         Center = true, AutoShow = true, TabPadding = 8, MenuFadeTime = 0.2,
     })
@@ -6535,6 +6585,40 @@ if HUB_CURRENT ~= 'roguecopy' then
                     if not p then Library:Notify('Unknown boss position', 2); return end
                     S.glideTo(p + Vector3.new(0, 5, 0), nil, n)
                 end })
+                -- ---- Coordinates: separate X / Y / Z boxes ------------------------
+                -- Finished = false: the value updates as you type / paste (with true it
+                -- only commits on Enter, so clicking Go right after pasting read nothing).
+                -- Pasting "x, y, z" into the X box also works - it is split into all three.
+                box:AddInput('SLTPX', { Text = 'X', Default = '', Finished = false, Placeholder = '-956.524' })
+                box:AddInput('SLTPY', { Text = 'Y', Default = '', Finished = false, Placeholder = '1223.9' })
+                box:AddInput('SLTPZ', { Text = 'Z', Default = '', Finished = false, Placeholder = '-937.852' })
+                local function num(v) return tonumber((tostring(v or ''):gsub('[%s,]', ''))) end
+                local function coordGo()
+                    local x, y, z = num(Options.SLTPX.Value), num(Options.SLTPY.Value), num(Options.SLTPZ.Value)
+                    if not (y and z) then -- "x, y, z" pasted into one box
+                        local nums = {}
+                        for n in tostring(Options.SLTPX.Value or ''):gmatch('%-?%d+%.?%d*') do nums[#nums + 1] = tonumber(n) end
+                        if #nums >= 3 then x, y, z = nums[1], nums[2], nums[3] end
+                    end
+                    if not (x and y and z) then Library:Notify('Enter a number in X, Y and Z', 3); return end
+                    local p = Vector3.new(x, y, z)
+                    if p.Magnitude > 1e5 then Library:Notify('Coordinates out of range', 3); return end
+                    S.glideTo(p + Vector3.new(0, 3, 0), nil, ('%.1f, %.1f, %.1f'):format(p.X, p.Y, p.Z))
+                end
+                box:AddButton({ Text = 'Go to coords', Func = coordGo })
+                    :AddButton({ Text = 'Copy my position', Func = function()
+                        local r = S.root()
+                        if not r then Library:Notify('No character', 2); return end
+                        local p = r.Position
+                        pcall(function()
+                            Options.SLTPX:SetValue(('%.3f'):format(p.X))
+                            Options.SLTPY:SetValue(('%.3f'):format(p.Y))
+                            Options.SLTPZ:SetValue(('%.3f'):format(p.Z))
+                        end)
+                        local s = ('%.3f, %.3f, %.3f'):format(p.X, p.Y, p.Z)
+                        if setclipboard then pcall(setclipboard, s) end
+                        Library:Notify('Position: ' .. s, 4)
+                    end })
                 box:AddButton({ Text = 'Stop glide', Func = function() S.stopGlide(); Library:Notify('Glide stopped', 1.5) end })
                 box:AddLabel('Stop key'):AddKeyPicker('SLStopGlideKey', { Default = 'None', Mode = 'Toggle', Text = 'Stop glide' })
                 Options.SLStopGlideKey:OnClick(function() S.stopGlide() end)
@@ -7003,6 +7087,689 @@ if HUB_CURRENT ~= 'roguecopy' then
                 htrack(Players.PlayerRemoving:Connect(function(p) if staff[p] then staff[p] = nil; redraw() end end))
             end)()
         end)()
+    elseif HUB_CURRENT == 'practicalbb' then
+        -- ===== PRACTICALBB (basketball, Aero framework) ===================
+        -- Source: PracticalBB/extracted/. Every remote lives at
+        -- ReplicatedStorage.Aero.AeroRemoteServices.<Service>.<Remote>, and Aero's
+        -- client :Fire(...) is a plain remote:FireServer(...) (Internal/AeroClient).
+        local Players     = game:GetService('Players')
+        local LocalPlayer = Players.LocalPlayer
+        local HttpService = game:GetService('HttpService')
+        local StatsSvc    = game:GetService('Stats')
+        local PLACE_NAMES = { [115776365257536] = 'Plaza', [119587547774646] = 'Private Gym', [118669925076970] = 'Park' }
+        local resetCalib -- forward-declared for the button
+
+        local Tab = Window:AddTab('PracticalBB')
+
+        -- ===== UI: Auto Perfect Release ===================================
+        local MeterBox = Tab:AddLeftGroupbox('Auto Perfect Release')
+        MeterBox:AddLabel('The shot meter runs on the SERVER. It streams the\nfill to your character\'s meterOffset attribute and\nleaves the bar frozen exactly where it judged your\nrelease. After every shot this reads that frozen spot\nand the grade, learns where Perfect sits and how late\nyour release lands, and lets go so it lands in the\nmiddle of Perfect. Press and hold your shoot key.', true)
+        local MeterStatus = MeterBox:AddLabel('Idle', true)
+        local CalibLabel  = MeterBox:AddLabel('Calibration: none yet', true)
+        MeterBox:AddToggle('PBAutoRelease', {
+            Text = 'Auto perfect release', Default = false,
+            Tooltip = 'Press and hold your shoot key; the release is sent for you at the perfect moment. If the fill cannot be tracked for a shot, that shot is left completely to you.',
+        }):AddKeyPicker('PBAutoReleaseKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto perfect release' })
+        MeterBox:AddToggle('PBHoldForMe', { Text = 'Ignore my early let-go', Default = true,
+            Tooltip = 'Only while the fill is being tracked live: the game\'s own release (letting go of the shoot key, or a Jump key-up) is held back so it cannot beat the timed release. The moment the fill stops updating, the held release is sent - it can never stall a shot.' })
+        MeterBox:AddToggle('PBLearn', { Text = 'Learn from every shot', Default = true,
+            Tooltip = 'After every shot (auto OR by hand) the spot where the server froze the bar is saved with its grade: Perfects mark the window, Good / Early grades sit below it, Late grades above it. Auto releases also measure how long your release takes to land. Saved per meter type to a file, so it carries over between sessions.' })
+        MeterBox:AddSlider('PBPingComp', { Text = 'Ping compensation', Default = 100, Min = 0, Max = 200, Rounding = 0, Suffix = ' %',
+            Tooltip = 'Starting lead = this % of your round trip. After each shot the measured landing delay corrects it automatically, so leave it at 100% unless the log shows the delay is wildly off.' })
+        MeterBox:AddSlider('PBTrim', { Text = 'Manual trim', Default = 0, Min = -0.15, Max = 0.15, Rounding = 3,
+            Tooltip = 'Shift the aim by hand, in bar units. One server frame is about 0.05 on the Vertical meter. Negative = earlier. Added on top of the learned aim.' })
+        MeterBox:AddToggle('PBMeterLog', { Text = 'Log meter (console)', Default = false,
+            Tooltip = 'Print every shot: meter type, fill updates, where the release went out, where the server froze the bar, the landing delay, the grade and the next aim. Works with Auto off too.' })
+        MeterBox:AddButton({ Text = 'Reset calibration', Func = function() if resetCalib then resetCalib() end end })
+
+        -- ===== UI: Info ===================================================
+        local InfoBox = Tab:AddRightGroupbox('PracticalBB')
+        InfoBox:AddLabel(('Place: %s (%d)\nUniverse: %d'):format(PLACE_NAMES[game.PlaceId] or 'unknown', game.PlaceId, game.GameId), true)
+        InfoBox:AddButton({ Text = 'Copy PlaceId', Func = function()
+            if setclipboard then pcall(setclipboard, tostring(game.PlaceId)) end
+            Library:Notify('Copied PlaceId: ' .. tostring(game.PlaceId), 4)
+        end }):AddButton({ Text = 'Copy GameId (universe)', Func = function()
+            if setclipboard then pcall(setclipboard, tostring(game.GameId)) end
+            Library:Notify('Copied GameId: ' .. tostring(game.GameId), 4)
+        end })
+
+        -- ===== Movement: faster sprint + longer dribble moves ==============
+        -- From the decompiled client (Modules/Components/Character.lua, .../Character/
+        -- Movement.lua, Movement/Types/Base.lua, Controllers/Replication.lua):
+        --  * Your character is driven on YOUR client: a ProxyCharacter part with a
+        --    BodyVelocity "MovementVelocity", set every Heartbeat by the current
+        --    movement type's UpdateSpeed + UpdateVelocity. Its position + velocity are
+        --    streamed to the server 60x/s (ReplicatedStorage.Replication), so moving the
+        --    proxy is exactly what the server sees.
+        --  * Sprint (Shift -> InputService.Sprint) only flips the server's Sprinting
+        --    state. The speed is computed here: goal = min(WalkSpeed, 17) + 3.35 while
+        --    sprinting with Stamina > 0.25, eased through a spring (Base.UpdateSpeed).
+        --  * Double-tap C / Z = Tween / DoubleCrossover (Shared/Config/Game/Dribbling);
+        --    with sprint held they are the "Escape" moves that carry you forward. During
+        --    a move the server sets Action = "Dribbling" + ServerVelocity and the client
+        --    eases MovementVelocity toward it (Base.UpdateVelocity).
+        --  * The game zeroes any velocity it computes above 27.5 - boosts stay <= 26.5.
+        -- The boost wraps the game's own UpdateSpeed / UpdateVelocity on YOUR movement
+        -- object only (per-instance shadow, removed on unload): right after the game sets
+        -- the velocity it is scaled, and the unscaled value is put back before the next
+        -- frame's update, so the game's own easing never compounds the boost.
+        ;(function()
+            local MoveBox = Tab:AddRightGroupbox('Movement')
+            MoveBox:AddLabel('Small, believable boosts. Your character is moved by your own client and its position is sent to the server, so these really move you. Keep them subtle: other players see it, and the server may check speeds.', true)
+            local MoveStatus = MoveBox:AddLabel('Idle', true)
+            MoveBox:AddToggle('PBSprintBoost', { Text = 'Faster sprint', Default = false,
+                Tooltip = 'While you hold your sprint key (Shift) and have stamina, you run this much faster than the normal sprint.' })
+                :AddKeyPicker('PBSprintBoostKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Faster sprint' })
+            MoveBox:AddSlider('PBSprintMult', { Text = 'Sprint speed', Default = 1.08, Min = 1, Max = 1.3, Rounding = 2, Suffix = 'x',
+                Tooltip = 'Normal sprint tops out around 20 studs/s. 1.08x is about +1.6 studs/s.' })
+            MoveBox:AddToggle('PBDribbleBoost', { Text = 'Longer dribble moves', Default = false,
+                Tooltip = 'The double-tap C / Z moves (Tween, Double Crossover; with sprint held they carry you forward) travel this much further.' })
+                :AddKeyPicker('PBDribbleBoostKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Longer dribble moves' })
+            MoveBox:AddSlider('PBDribbleMult', { Text = 'Dribble move distance', Default = 1.15, Min = 1, Max = 1.5, Rounding = 2, Suffix = 'x' })
+            MoveBox:AddToggle('PBDribbleForward', { Text = 'Forward moves only', Default = true,
+                Tooltip = 'Only stretch a dribble move while it carries you the way you are steering (or facing). Sideways crossovers keep their normal distance.' })
+
+            local MAX_SPEED = 26.5
+            local wrapped = setmetatable({}, { __mode = 'k' }) -- [movement type instance] = { S, V, wS, wV }
+            local boost = setmetatable({}, { __mode = 'k' })   -- [movement] = { w = scaled, u = unscaled }
+            local live = { kind = nil, speed = 0, k = 1 }      -- written on the game thread (plain values only)
+            local function on(name) return Toggles[name] and Toggles[name].Value end
+            local function flatUnit(v)
+                local f = Vector3.new(v.X, 0, v.Z)
+                return (f.Magnitude > 0.05) and f.Unit or nil
+            end
+            -- Put back the game's own velocity if it still holds our scaled one.
+            local function restore(M)
+                local b = boost[M]
+                if not b then return end
+                boost[M] = nil
+                local bv = rawget(M, 'MovementVelocity')
+                if bv and bv.Parent and bv.Velocity == b.w then bv.Velocity = b.u end
+            end
+            -- Right after the game set this frame's velocity: scale it if a boost applies.
+            local function apply(M)
+                local bv, st = rawget(M, 'MovementVelocity'), rawget(M, 'State')
+                if not (bv and st) then return end
+                local u = bv.Velocity
+                local sp = Vector3.new(u.X, 0, u.Z).Magnitude
+                local k, kind = 1, nil
+                if sp > 1 then
+                    if st:GetAttribute('CanMove') then
+                        if on('PBSprintBoost') and M:IsSprinting() then
+                            local ch = rawget(M, 'Character')
+                            local model = type(ch) == 'table' and ch.model
+                            local stam = (typeof(model) == 'Instance' and model:GetAttribute('Stamina')) or 0
+                            if stam > 0.25 then k, kind = Options.PBSprintMult.Value, 'sprint' end
+                        end
+                    elseif on('PBDribbleBoost') and st:GetAttribute('Action') == 'Dribbling' and st:GetAttribute('ServerVelocity') then
+                        local ok = true
+                        if on('PBDribbleForward') then
+                            local dir = flatUnit(u)
+                            local steer = typeof(rawget(M, 'lastMoveDirection')) == 'Vector3' and flatUnit(M.lastMoveDirection)
+                            local root = rawget(M, 'Root')
+                            local face = typeof(root) == 'Instance' and flatUnit(root.CFrame.LookVector)
+                            ok = dir ~= nil and ((steer and dir:Dot(steer) > 0.5) or (not steer and face and dir:Dot(face) > 0.5)) or false
+                        end
+                        if ok then k, kind = Options.PBDribbleMult.Value, 'dribble' end
+                    end
+                end
+                live.kind, live.speed = kind, sp
+                if kind and sp * k > MAX_SPEED then k = MAX_SPEED / sp end
+                live.k = kind and k or 1
+                if not kind or k <= 1.001 then return end
+                local w = Vector3.new(u.X * k, u.Y, u.Z * k)
+                bv.Velocity = w
+                boost[M] = { w = w, u = u }
+            end
+            local function wrapTypes(M)
+                local types = rawget(M, 'Types')
+                if type(types) ~= 'table' then return end
+                for _, inst in pairs(types) do
+                    if type(inst) == 'table' and not wrapped[inst] and rawget(inst, 'UpdateVelocity') == nil then
+                        local okV, origV = pcall(function() return inst.UpdateVelocity end)
+                        if okV and type(origV) == 'function' then
+                            local okS, origS = pcall(function() return inst.UpdateSpeed end)
+                            local w = { V = origV }
+                            if okS and type(origS) == 'function' and rawget(inst, 'UpdateSpeed') == nil then
+                                w.S = origS
+                                w.wS = function(self, ...)
+                                    local mv = rawget(self, 'Movement')
+                                    if mv then pcall(restore, mv) end
+                                    return w.S(self, ...)
+                                end
+                                rawset(inst, 'UpdateSpeed', w.wS)
+                            end
+                            w.wV = function(self, ...)
+                                local mv = rawget(self, 'Movement')
+                                if mv and not w.S then pcall(restore, mv) end
+                                local r = table.pack(w.V(self, ...))
+                                if mv then pcall(apply, mv) end
+                                return table.unpack(r, 1, r.n)
+                            end
+                            rawset(inst, 'UpdateVelocity', w.wV)
+                            wrapped[inst] = w
+                        end
+                    end
+                end
+            end
+            local function unwrapAll()
+                for M in pairs(boost) do pcall(restore, M) end
+                for inst, w in pairs(wrapped) do
+                    if w.wS and rawget(inst, 'UpdateSpeed') == w.wS then rawset(inst, 'UpdateSpeed', nil) end
+                    if rawget(inst, 'UpdateVelocity') == w.wV then rawset(inst, 'UpdateVelocity', nil) end
+                    wrapped[inst] = nil
+                end
+            end
+            htrack({ Disconnect = unwrapAll })
+
+            -- Your live movement object: the game's own Player controller holds it
+            -- (Keyboard.lua reads Player.Character.Movement). getgc is the fallback.
+            local cachedM, lastGc = nil, -1e9
+            local function validM(M)
+                local bv = type(M) == 'table' and rawget(M, 'MovementVelocity')
+                return typeof(bv) == 'Instance' and bv:IsDescendantOf(workspace) and type(rawget(M, 'Types')) == 'table'
+            end
+            local function findMovement()
+                local ok, P = pcall(function()
+                    local ps = LocalPlayer:FindFirstChild('PlayerScripts')
+                    local aero = ps and ps:FindFirstChild('Aero')
+                    local ctl = aero and aero:FindFirstChild('Controllers')
+                    local m = ctl and ctl:FindFirstChild('Player')
+                    return m and require(m)
+                end)
+                if ok and type(P) == 'table' then
+                    local ch = rawget(P, 'Character')
+                    local M = type(ch) == 'table' and rawget(ch, 'Movement')
+                    if validM(M) then cachedM = M; return M end
+                end
+                if validM(cachedM) then return cachedM end
+                cachedM = nil
+                if getgc and os.clock() - lastGc > 3 then
+                    lastGc = os.clock()
+                    for _, t in ipairs(getgc(true)) do
+                        if type(t) == 'table' and rawget(t, 'WalkSpring') ~= nil and validM(t) then cachedM = t; break end
+                    end
+                end
+                return cachedM
+            end
+            local function setMoveStatus(t) if MoveStatus then pcall(MoveStatus.SetText, MoveStatus, t) end end
+            local acc, lastTxt = 0, nil
+            htrack(RunService.Heartbeat:Connect(function(dt)
+                acc = acc + dt
+                if acc < 0.25 then return end
+                acc = 0
+                local txt
+                if not (on('PBSprintBoost') or on('PBDribbleBoost')) then
+                    if next(wrapped) then unwrapAll() end
+                    txt = 'Idle'
+                else
+                    local M = findMovement()
+                    if not M then
+                        txt = 'Waiting for your character (movement controller not found yet)'
+                    else
+                        wrapTypes(M)
+                        if live.kind == 'sprint' then
+                            txt = ('Sprint boost: %.1f -> %.1f studs/s (%.2fx)'):format(live.speed, live.speed * live.k, live.k)
+                        elseif live.kind == 'dribble' then
+                            txt = ('Dribble boost: %.1f -> %.1f studs/s (%.2fx)'):format(live.speed, live.speed * live.k, live.k)
+                        else
+                            txt = ('Armed - %.1f studs/s'):format(live.speed)
+                        end
+                    end
+                end
+                if txt ~= lastTxt then lastTxt = txt; setMoveStatus(txt) end
+            end))
+        end)()
+
+        -- ===== LOGIC: Auto Perfect Release ================================
+        -- Grounded in the decompiled client (Controllers/Meter, Input/Keyboard,
+        -- UI/Character/ShotFeedback, UI/LearnPB/Tutorial) + logged sessions:
+        --  * press   = InputService.Shoot:FireServer({Shoot=true, Input="E"})
+        --    release = InputService.Shoot:FireServer({Shoot=false}). Nothing else
+        --    rides with the release - the SERVER times it against its own meter.
+        --    (The game itself also sends {Shoot=false} on every Jump key-up, so an
+        --    extra release is ordinary traffic.)
+        --  * the server streams the fill to <your character>:meterOffset (a Vector2
+        --    the client only tweens onto FillGradient.Offset), one value per server
+        --    frame, and LEAVES IT FROZEN where it judged the release. Logged: every
+        --    Good froze at ~1.41, the Perfect at 1.462 - exactly one server frame
+        --    (~0.05 of bar at 3.05/s) apart. So the frozen spot + the grade map the
+        --    Perfect window precisely, and frozen spot minus the release point gives
+        --    the real landing delay (measured ~16 ms at 34 ms ping - less than one
+        --    round trip, because the frozen value is the server's previous frame).
+        --  * GameplayService.Meter(show, char, type) shows / hides the meter;
+        --    MeterService.RegisterPacket(char, type, greenWindow) and
+        --    UpdateGreenWindow(char, greenWindow) carry the green size.
+        --  * InterfaceService.ShowFeedback(char, contest%, grade): 1 Very Early,
+        --    2 Early, 3 Slightly Early, 4 Good, 5 Perfect, 6 Slightly Late, 7 Late,
+        --    8 Very Late (ShotFeedback.lua) - Good is the last EARLY grade.
+        -- Positions are ABSOLUTE bar units along the bar's direction of travel
+        -- (meterOffset projected on it), the same units the server freezes it in.
+        -- Safety rule: the player's own release is only ever held back while fresh
+        -- fill updates are arriving; the instant they stop, it goes out.
+        local GRADES = { 'Very Early', 'Early', 'Slightly Early', 'Good', 'Perfect', 'Slightly Late', 'Late', 'Very Late' }
+        local BASE_TARGET = 0.98 -- meter with no data yet: aim this far past the start, the grades walk it in
+        local FRESH = 0.3        -- a fill update older than this = no longer tracking live
+        local EDGE = 0.03        -- assumed Perfect width past the outermost Perfect when nothing bounds that side
+        local STEP_UP = 0.05     -- no Perfect yet: aim one server frame past the latest early (before the earliest late)
+        local MAX_SAMPLES = 40   -- shots remembered per meter type
+        local CALIB_DIR, CALIB_FILE = 'GameHub_practicalbb', 'GameHub_practicalbb/meter_calibration.json'
+        -- Starting point from your logged session (Vertical meter): where the server
+        -- froze each shot + its grade, and the measured landing correction.
+        local SEED = {
+            adj = -0.016,
+            types = { Vertical = { { 1.411, 4 }, { 1.410, 4 }, { 1.411, 4 }, { 1.414, 4 }, { 1.462, 5 }, { 1.410, 4 } } },
+        }
+
+        local setIdentity = setthreadidentity or set_thread_identity or (syn and syn.set_thread_identity)
+        local function setText(lbl, t)
+            if not lbl then return end
+            if setIdentity then pcall(setIdentity, 8) end
+            pcall(lbl.SetText, lbl, t)
+        end
+        local function setStatus(t) setText(MeterStatus, t) end
+        local function autoOn() return Toggles.PBAutoRelease and Toggles.PBAutoRelease.Value end
+        local function log(msg) if Toggles.PBMeterLog and Toggles.PBMeterLog.Value then print('[PB meter] ' .. msg) end end
+        local function f3(x) return type(x) == 'number' and ('%.3f'):format(x) or tostring(x) end
+        local function ms(x) return type(x) == 'number' and tostring(math.floor(x * 1000 + 0.5)) or '?' end
+        local function vecStr(v) return typeof(v) == 'Vector2' and ('(%.3f, %.3f)'):format(v.X, v.Y) or tostring(v) end
+        local function trimNow() return (Options.PBTrim and Options.PBTrim.Value) or 0 end
+        local function pingComp() return ((Options.PBPingComp and Options.PBPingComp.Value) or 100) / 100 end
+        local function rtt() -- round trip, seconds
+            local ok, v = pcall(function() return StatsSvc.Network.ServerStatsItem['Data Ping']:GetValue() end)
+            if ok and type(v) == 'number' and v > 0 then return v / 1000 end
+            local ok2, s = pcall(function() return LocalPlayer:GetNetworkPing() end)
+            if ok2 and type(s) == 'number' and s > 0 then return s end
+            return 0.1
+        end
+
+        -- ---- calibration: per meter type, the frozen spots + grades ---------
+        local function freshCalib()
+            local c = { v = 3, adj = SEED.adj, types = {} }
+            for k, list in pairs(SEED.types) do
+                local copy = {}
+                for i, smp in ipairs(list) do copy[i] = { smp[1], smp[2] } end
+                c.types[k] = { s = copy, shots = 0, perfects = 0 }
+            end
+            return c
+        end
+        local calib = freshCalib()
+        pcall(function()
+            if not (isfile and isfile(CALIB_FILE)) then return end
+            local t = HttpService:JSONDecode(readfile(CALIB_FILE))
+            if type(t) ~= 'table' or t.v ~= 3 or type(t.types) ~= 'table' then return end -- older format: start from the seed
+            calib.adj = math.clamp(tonumber(t.adj) or calib.adj, -0.15, 0.15)
+            for k, e in pairs(t.types) do
+                if type(k) == 'string' and type(e) == 'table' and type(e.s) == 'table' then
+                    local list = {}
+                    for _, smp in ipairs(e.s) do
+                        local f, g = type(smp) == 'table' and tonumber(smp[1]), type(smp) == 'table' and tonumber(smp[2])
+                        if f and g and g >= 1 and g <= 8 then list[#list + 1] = { f, g } end
+                    end
+                    calib.types[k] = { s = list, shots = tonumber(e.shots) or 0, perfects = tonumber(e.perfects) or 0 }
+                end
+            end
+        end)
+        local function saveCalib()
+            pcall(function()
+                if makefolder and isfolder and not isfolder(CALIB_DIR) then makefolder(CALIB_DIR) end
+                if writefile then writefile(CALIB_FILE, HttpService:JSONEncode(calib)) end
+            end)
+        end
+        local function typeKey(mtype) return (type(mtype) == 'string' and mtype ~= '') and mtype or 'Unknown' end
+        local function entryFor(mtype)
+            local k = typeKey(mtype)
+            local e = calib.types[k]
+            if not e then e = { s = {}, shots = 0, perfects = 0 }; calib.types[k] = e end
+            return e
+        end
+        -- Where Perfect sits, from the remembered frozen spots: aim, lo, hi, how.
+        --  * Perfects seen: the window runs from halfway between the highest early
+        --    stop below them and the lowest Perfect, to halfway between the highest
+        --    Perfect and the lowest late stop above it (EDGE past it when unbounded).
+        --  * no Perfect yet: halfway between early and late, else one frame past
+        --    the latest early (or before the earliest late) - walks in shot by shot.
+        local function estimate(list)
+            local P, E, L = {}, {}, {}
+            for _, smp in ipairs(list) do
+                local f, g = smp[1], smp[2]
+                if g == 5 then P[#P + 1] = f elseif g < 5 then E[#E + 1] = f else L[#L + 1] = f end
+            end
+            if #P > 0 then
+                local pLo, pHi = math.huge, -math.huge
+                for _, f in ipairs(P) do pLo, pHi = math.min(pLo, f), math.max(pHi, f) end
+                local eMax, lMin
+                for _, f in ipairs(E) do if f < pLo and (not eMax or f > eMax) then eMax = f end end
+                for _, f in ipairs(L) do if f > pHi and (not lMin or f < lMin) then lMin = f end end
+                local lo = eMax and (eMax + pLo) / 2 or (pLo - EDGE)
+                local hi = lMin and (lMin + pHi) / 2 or (pHi + EDGE)
+                return (lo + hi) / 2, lo, hi, ('%d perfect stop%s'):format(#P, #P == 1 and '' or 's')
+            end
+            local eMax, lMin
+            for _, f in ipairs(E) do if not eMax or f > eMax then eMax = f end end
+            for _, f in ipairs(L) do if not lMin or f < lMin then lMin = f end end
+            if eMax and lMin then return (eMax + lMin) / 2, eMax, lMin, 'between early and late stops' end
+            if eMax then return eMax + STEP_UP, eMax, nil, 'one frame past the latest early stop' end
+            if lMin then return lMin - STEP_UP, nil, lMin, 'one frame before the earliest late stop' end
+            return nil
+        end
+        -- The lead: one round trip x ping comp, corrected by the measured landing delay.
+        local function leadFor(r) return math.clamp(r * pingComp() + calib.adj, 0, 0.5) end
+        -- Aim for a shot in absolute bar units (nil until the bar's direction is known).
+        local function aimFor(s)
+            if not s.base then return nil end
+            local a, lo, hi, how = estimate(entryFor(s.mtype).s)
+            if not a then a, how = s.base + BASE_TARGET, 'default (no shots learned yet)' end
+            return a + trimNow(), lo, hi, how
+        end
+        local shownType = 'Vertical'
+        local function showCalib(mtype)
+            if mtype then shownType = typeKey(mtype) end
+            local e = calib.types[shownType]
+            local a, lo, hi
+            if e then a, lo, hi = estimate(e.s) end
+            local r = rtt()
+            setText(CalibLabel, ('%s meter: aim %s%s\nLead %s ms (ping %s ms, measured correction %+d ms)\n%d shots learned (%d perfect), %d spots in memory'):format(
+                shownType, a and f3(a + trimNow()) or 'none yet',
+                (lo and hi) and (' (Perfect ~%s - %s)'):format(f3(lo), f3(hi)) or '',
+                ms(leadFor(r)), ms(r), math.floor(calib.adj * 1000 + 0.5),
+                e and e.shots or 0, e and e.perfects or 0, e and #e.s or 0))
+        end
+        showCalib()
+        resetCalib = function()
+            calib = freshCalib()
+            saveCalib(); showCalib()
+            Library:Notify('Meter calibration reset to the built-in starting point', 3)
+        end
+
+        -- My fighter = workspace.Characters[<my name>] (Components/Character.lua).
+        local function isMine(m) return typeof(m) == 'Instance' and m.Name == LocalPlayer.Name end
+        local function asVec(v)
+            if typeof(v) == 'Vector2' then return v end
+            if type(v) == 'number' then return Vector2.new(v, 0) end
+            return nil
+        end
+
+        local shootRemote -- InputService.Shoot (resolved async below)
+        local shot        -- the live shot { t0, model, samples, origin, u, base, peak, conn, released, userRelAt, ... }
+        local lastShot    -- the most recent shot (graded when its feedback arrives)
+        local lastGW      -- most recent green window for my character
+        local swallowedAt -- written by the hook: when we held back the game's own release
+
+        -- Fill (relative to this shot's start) + speed at clock time t.
+        local function fillAt(s, t)
+            local smp = s.samples
+            local k
+            for i = #smp, 1, -1 do if smp[i].t <= t then k = i; break end end
+            if not k then return nil, 0 end
+            local last = smp[k]
+            local j = k - 1
+            while j > 1 and last.t - smp[j].t < 0.12 do j = j - 1 end
+            local v = 0
+            if j >= 1 and last.t > smp[j].t then v = (last.p - smp[j].p) / (last.t - smp[j].t) end
+            return last.p + math.max(v, 0) * (t - last.t), v
+        end
+        -- The ONLY state in which the player's own release may be held back.
+        local function tracking(s, now)
+            if not s or s.released or s.blind then return false end
+            local n = #s.samples
+            return n >= 2 and (now - s.samples[n].t) < FRESH
+        end
+        local function traceStr(s, now)
+            return ('%d fill updates in %.2fs, start %s, last %s'):format(#s.samples, now - s.t0, vecStr(s.origin), vecStr(s.lastRaw))
+        end
+
+        local function endShot()
+            if shot and shot.conn then pcall(function() shot.conn:Disconnect() end) end
+            shot = nil
+        end
+        htrack({ Disconnect = endShot })
+        local function beginShot(model, mtype)
+            local now = os.clock()
+            if shot and shot.model == model and not shot.released and now - shot.t0 < 0.6 then
+                if mtype then shot.mtype = mtype end
+                return shot
+            end
+            endShot()
+            local s = { t0 = now, model = model, samples = {}, gw = lastGW, peak = 0, mtype = mtype }
+            -- Only CHANGES are sampled: a frozen value left over from the previous
+            -- shot never counts. p = distance travelled from this shot's start;
+            -- u = direction of travel; base = the start's position along u, so the
+            -- absolute bar position (what the server freezes) = p + base.
+            s.conn = model:GetAttributeChangedSignal('meterOffset'):Connect(function()
+                local raw = asVec(model:GetAttribute('meterOffset'))
+                if not raw then return end
+                if not s.origin then s.origin = (raw.Magnitude < 0.15) and Vector2.zero or raw end
+                local d = raw - s.origin
+                local p = d.Magnitude
+                local n = #s.samples
+                if n > 0 and not s.released and p < s.samples[n].p - 0.05 then
+                    -- moved back toward the start: the server restarted the bar
+                    table.clear(s.samples)
+                    s.origin, s.peak, s.u, s.base = raw, 0, nil, nil
+                    d, p = Vector2.zero, 0
+                end
+                if not s.u and p > 0.05 then s.u = d.Unit; s.base = s.origin:Dot(s.u) end
+                local t = os.clock()
+                s.samples[#s.samples + 1] = { t = t, p = p }
+                s.lastRaw = raw
+                if p > s.peak then s.peak, s.peakAt = p, t end
+            end)
+            shot, lastShot = s, s
+            return s
+        end
+
+        local function fireRelease()
+            local r = shootRemote
+            return r ~= nil and (pcall(function() r:FireServer({ Shoot = false }) end))
+        end
+        -- p / v relative to the shot start. why: nil = timed release, 'peak' = the
+        -- bar topped out first; both teach the landing delay. Fail-safes
+        -- ('timeout', 'your release ...') do not.
+        local function release(s, p, v, lead, aim, why, r)
+            local now = os.clock()
+            s.released, s.releasedAt = true, now
+            s.relP, s.relV, s.lead, s.aim, s.why, s.relRtt = p, v, lead, aim, why, r
+            swallowedAt = nil
+            local ok = fireRelease()
+            local land = (s.base and p) and (p + s.base + (v or 0) * (lead or 0)) or nil
+            setStatus(ok and ('Released at %s - should land %s (aim %s, lead %s ms%s)'):format(
+                    f3(s.base and p and p + s.base or p), f3(land), f3(aim), ms(lead), why and (', ' .. why) or '')
+                or 'Release failed: Shoot remote not found')
+            log(('auto release at %s (abs), speed %s/s, lead %s ms (ping %s) -> should land %s, aim %s (%s) | %s'):format(
+                f3(s.base and p and p + s.base or p), f3(v), ms(lead), ms(r), f3(land), f3(aim), tostring(why or 'timed'), traceStr(s, now)))
+        end
+
+        -- "Ignore my early let-go": hold back the GAME's own plain release
+        -- ({Shoot=false} with no Input field = shoot-key or Jump key-up), but ONLY
+        -- while the fill is being tracked live. Runs on the game's thread, so it only
+        -- writes plain values. Our own release passes checkcaller() untouched.
+        do
+            local hookMeta, getNC = hookmetamethod, getnamecallmethod
+            local canCall = checkcaller or function() return false end
+            if hookMeta and getNC then
+                local nmOld
+                local okH = pcall(function()
+                    nmOld = hookMeta(game, '__namecall', function(self, ...)
+                        if nmOld and shootRemote and self == shootRemote and not canCall() and getNC() == 'FireServer' then
+                            local a = ...
+                            if type(a) == 'table' and a.Shoot == false and a.Input == nil then
+                                local s, now = shot, os.clock()
+                                if autoOn() and Toggles.PBHoldForMe and Toggles.PBHoldForMe.Value and tracking(s, now) then
+                                    swallowedAt = swallowedAt or now
+                                    return -- held: the timed release replaces it
+                                end
+                                if s and not s.released and not s.userRelAt then s.userRelAt = now end -- your own release (log / learning)
+                            end
+                        end
+                        if nmOld then return nmOld(self, ...) end
+                        return self[getNC()](self, ...)
+                    end)
+                end)
+                if okH and nmOld then
+                    htrack({ Disconnect = function() pcall(function() hookMeta(game, '__namecall', nmOld) end) end })
+                else
+                    Library:Notify('PracticalBB: __namecall hook failed - "Ignore my early let-go" is off, keep holding the shoot key', 6)
+                end
+            end
+        end
+
+        htrack(RunService.Heartbeat:Connect(function(dt)
+            local now = os.clock()
+            local s = shot
+            -- A release we held back goes out the moment the fill is no longer tracked
+            -- live (or auto is switched off): a held shot can never stall.
+            if swallowedAt and not (autoOn() and tracking(s, now)) then
+                swallowedAt = nil
+                if s and not s.released then
+                    release(s, (fillAt(s, now)) or s.peak, 0, 0, nil, 'your release, fill stopped updating', rtt())
+                else
+                    fireRelease()
+                end
+                return
+            end
+            -- your own release already went out (not held back): the shot is yours
+            if not s or s.released or s.userRelAt then return end
+            local n = #s.samples
+            -- No fill updates for our shot: it cannot be timed - leave it to the player.
+            if not s.blind and n == 0 and now - s.t0 > 0.5 then
+                s.blind = true
+                if autoOn() then setStatus('No fill updates for this shot - it is yours to time (see log)') end
+                log(('meter shown (type %s) but no meterOffset updates arrived in 0.5s - this shot is not auto-timed'):format(tostring(s.mtype)))
+                return
+            end
+            if not autoOn() or s.blind then return end
+            if now - s.t0 > 3 then release(s, s.peak, 0, 0, nil, 'timeout', rtt()); return end
+            if n < 2 or not s.base then return end
+            local last = s.samples[n]
+            -- fill speed over the last ~0.12s of updates
+            local j = n - 1
+            while j > 1 and last.t - s.samples[j].t < 0.12 do j = j - 1 end
+            local first = s.samples[j]
+            local v = (last.t > first.t) and (last.p - first.p) / (last.t - first.t) or 0
+            local aim = aimFor(s)
+            -- Bar topped out short of the aim (fell back, or stopped updating after
+            -- real movement): the aim sits past its peak, so let go now.
+            if s.peak >= 0.3 and ((last.p < s.peak - 0.02) or (n >= 5 and now - last.t > 0.35)) then
+                release(s, last.p, v, 0, aim, 'peak', rtt()); return
+            end
+            if v <= 0 or now - last.t > FRESH then return end
+            local r = rtt()
+            local lead = leadFor(r)
+            local nowP = last.p + v * (now - last.t)
+            -- The server judges on whole frames, so fire on the frame whose landing is
+            -- CLOSEST to the aim (within half a frame of fill either side), not on the
+            -- first frame that is already past it.
+            if nowP + s.base + v * lead >= aim - v * math.clamp(dt or 0, 0, 0.05) * 0.5 then
+                release(s, nowP, v, lead, aim, nil, r)
+            end
+        end))
+
+        -- After the grade: read the frozen bar, remember (spot, grade), measure the landing delay.
+        local function learnFrom(s, F, g, name, contest)
+            local how, R, v, r
+            if s.releasedAt then
+                how, R, v, r = 'auto', (s.relP and s.base) and (s.relP + s.base) or nil, s.relV, s.relRtt
+            elseif s.userRelAt then
+                local p, vv = fillAt(s, s.userRelAt)
+                how, R, v, r = 'your', (p and s.base) and (p + s.base) or nil, vv, rtt()
+            end
+            local lag = (F and R and v and v > 0.5) and (F - R) / v or nil
+            local e = entryFor(s.mtype)
+            if Toggles.PBLearn and Toggles.PBLearn.Value and F and g and g >= 1 and g <= 8 then
+                e.s[#e.s + 1] = { math.floor(F * 1000 + 0.5) / 1000, g }
+                while #e.s > MAX_SAMPLES do table.remove(e.s, 1) end
+                e.shots = e.shots + 1
+                if g == 5 then e.perfects = e.perfects + 1 end
+                -- landing delay: from a timed / peak auto release or your own release
+                if lag and r and lag > -0.05 and lag < 0.5 and (how == 'your' or s.why == nil or s.why == 'peak') then
+                    local corr = lag - r * pingComp()
+                    calib.adj = math.clamp(calib.adj + 0.35 * (corr - calib.adj), -0.15, 0.15)
+                end
+                saveCalib()
+            end
+            showCalib(s.mtype)
+            local nextAim, lo, hi, why = estimate(e.s)
+            if nextAim then nextAim = nextAim + trimNow() end
+            setStatus(('%s - server stopped the bar at %s%s | next aim %s'):format(name, f3(F),
+                s.aim and (' (aim was ' .. f3(s.aim) .. ')') or '', f3(nextAim)))
+            log(('grade %s | %s release at %s, server froze the bar at %s, landed %s ms later (ping %s) | next aim %s, Perfect ~%s-%s (%s) | contest %s%%, green %s | %s'):format(
+                name, tostring(how or 'no'), f3(R), f3(F), ms(lag), ms(r), f3(nextAim), f3(lo), f3(hi), tostring(why),
+                tostring(contest), f3(s.gw), traceStr(s, s.releasedAt or s.userRelAt or os.clock())))
+        end
+
+        -- Remote wiring (async: the Aero folder can stream in after injection).
+        task.spawn(function()
+            local RS = game:GetService('ReplicatedStorage')
+            local aero = RS:WaitForChild('Aero', 60)
+            local ars = aero and aero:WaitForChild('AeroRemoteServices', 60)
+            if not ars then Library:Notify('PracticalBB: Aero remotes never appeared - Auto Perfect Release inactive', 6); return end
+            local function remote(svc, name)
+                local f = ars:WaitForChild(svc, 30)
+                local r = f and f:WaitForChild(name, 30)
+                return (r and r:IsA('RemoteEvent')) and r or nil
+            end
+            shootRemote = remote('InputService', 'Shoot')
+            if not shootRemote then Library:Notify('PracticalBB: InputService.Shoot not found - Auto Perfect Release inactive', 6) end
+            local meter    = remote('GameplayService', 'Meter')
+            local reg      = remote('MeterService', 'RegisterPacket')
+            local green    = remote('MeterService', 'UpdateGreenWindow')
+            local feedback = remote('InterfaceService', 'ShowFeedback')
+            if meter then htrack(meter.OnClientEvent:Connect(function(show, char, mtype)
+                if not isMine(char) then return end
+                if show then
+                    local s = beginShot(char, mtype)
+                    if typeKey(mtype) ~= shownType then showCalib(mtype) end
+                    local a = estimate(entryFor(mtype).s)
+                    log(('meter shown: type %s, last frozen spot %s, green window %s, aim %s'):format(tostring(mtype),
+                        vecStr(char:GetAttribute('meterOffset')), f3(s.gw), a and f3(a + trimNow()) or 'default'))
+                    if mtype == 'None' and autoOn() then
+                        setStatus('Meter type is "None" - pick any meter in Settings if releases never fire')
+                    end
+                elseif shot and shot.model == char then
+                    local s = shot
+                    if not s.released then
+                        log(('meter closed with no auto release: %s%s'):format(traceStr(s, os.clock()),
+                            s.userRelAt and (', you released at ' .. f3(((fillAt(s, s.userRelAt)) or 0) + (s.base or 0))) or ''))
+                        if autoOn() and not s.blind and not s.userRelAt then setStatus('Meter closed before the timed release') end
+                    end
+                    endShot()
+                end
+            end)) end
+            if reg then htrack(reg.OnClientEvent:Connect(function(char, mtype, gw)
+                if not isMine(char) then return end
+                lastGW = tonumber(gw) or lastGW
+                beginShot(char, mtype).gw = lastGW
+            end)) end
+            if green then htrack(green.OnClientEvent:Connect(function(char, gw)
+                if not isMine(char) then return end
+                lastGW = tonumber(gw) or lastGW
+                if shot then shot.gw = lastGW end
+            end)) end
+            if feedback then htrack(feedback.OnClientEvent:Connect(function(char, contest, grade)
+                if not isMine(char) then return end
+                local g = tonumber(grade)
+                local name = (g and GRADES[g]) or tostring(grade)
+                local s = lastShot
+                if not s or s.graded or os.clock() - s.t0 > 8 then
+                    log(('grade %s, contest %s%% (no tracked shot)'):format(name, tostring(contest)))
+                    return
+                end
+                s.graded = true
+                -- The bar stays frozen where the server judged the release; give the
+                -- last attribute update a moment to arrive, then read it.
+                task.delay(0.25, function()
+                    local raw = asVec(char:GetAttribute('meterOffset'))
+                    local F = (raw and s.u) and raw:Dot(s.u) or nil
+                    local ok, err = pcall(learnFrom, s, F, g, name, contest)
+                    if not ok then log('learn error: ' .. tostring(err)) end
+                end)
+            end)) end
+        end)
+
+        if Toggles.PBAutoRelease then Toggles.PBAutoRelease:OnChanged(function()
+            setStatus(Toggles.PBAutoRelease.Value and 'Armed - hold your shoot key' or 'Idle')
+        end) end
     else
         -- ===== UNIVERSAL HUB: any experience NOT registered above ========
         -- Game-agnostic basics that work on plain Roblox physics: Fly (with

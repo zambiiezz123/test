@@ -7168,6 +7168,10 @@ if HUB_CURRENT ~= 'roguecopy' then
             MoveBox:AddSlider('PBDribbleMult', { Text = 'Dribble move distance', Default = 1.15, Min = 1, Max = 1.5, Rounding = 2, Suffix = 'x' })
             MoveBox:AddToggle('PBDribbleForward', { Text = 'Forward moves only', Default = true,
                 Tooltip = 'Only stretch a dribble move while it carries you the way you are steering (or facing). Sideways crossovers keep their normal distance.' })
+            MoveBox:AddToggle('PBStepBack', { Text = 'Longer stepback', Default = false,
+                Tooltip = 'The stepback (X) carries you backward, away from where you face. This stretches only that backward travel, on its own slider.' })
+                :AddKeyPicker('PBStepBackKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Longer stepback' })
+            MoveBox:AddSlider('PBStepBackMult', { Text = 'Stepback distance', Default = 1.2, Min = 1, Max = 1.6, Rounding = 2, Suffix = 'x' })
 
             local MAX_SPEED = 26.5
             local wrapped = setmetatable({}, { __mode = 'k' }) -- [movement type instance] = { S, V, wS, wV }
@@ -7201,16 +7205,23 @@ if HUB_CURRENT ~= 'roguecopy' then
                             local stam = (typeof(model) == 'Instance' and model:GetAttribute('Stamina')) or 0
                             if stam > 0.25 then k, kind = Options.PBSprintMult.Value, 'sprint' end
                         end
-                    elseif on('PBDribbleBoost') and st:GetAttribute('Action') == 'Dribbling' and st:GetAttribute('ServerVelocity') then
-                        local ok = true
-                        if on('PBDribbleForward') then
-                            local dir = flatUnit(u)
-                            local steer = typeof(rawget(M, 'lastMoveDirection')) == 'Vector3' and flatUnit(M.lastMoveDirection)
-                            local root = rawget(M, 'Root')
-                            local face = typeof(root) == 'Instance' and flatUnit(root.CFrame.LookVector)
-                            ok = dir ~= nil and ((steer and dir:Dot(steer) > 0.5) or (not steer and face and dir:Dot(face) > 0.5)) or false
+                    elseif st:GetAttribute('Action') == 'Dribbling' and st:GetAttribute('ServerVelocity') then
+                        local dir = flatUnit(u)
+                        local root = rawget(M, 'Root')
+                        local face = typeof(root) == 'Instance' and flatUnit(root.CFrame.LookVector)
+                        -- No move name reaches the client: a stepback is the dribble move that
+                        -- carries you away from where you face.
+                        local back = dir ~= nil and face and dir:Dot(face) < -0.5
+                        if back and on('PBStepBack') then
+                            k, kind = Options.PBStepBackMult.Value, 'stepback'
+                        elseif not back and on('PBDribbleBoost') then
+                            local ok = true
+                            if on('PBDribbleForward') then
+                                local steer = typeof(rawget(M, 'lastMoveDirection')) == 'Vector3' and flatUnit(M.lastMoveDirection)
+                                ok = dir ~= nil and ((steer and dir:Dot(steer) > 0.5) or (not steer and face and dir:Dot(face) > 0.5)) or false
+                            end
+                            if ok then k, kind = Options.PBDribbleMult.Value, 'dribble' end
                         end
-                        if ok then k, kind = Options.PBDribbleMult.Value, 'dribble' end
                     end
                 end
                 live.kind, live.speed = kind, sp
@@ -7299,7 +7310,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                 if acc < 0.25 then return end
                 acc = 0
                 local txt
-                if not (on('PBSprintBoost') or on('PBDribbleBoost')) then
+                if not (on('PBSprintBoost') or on('PBDribbleBoost') or on('PBStepBack')) then
                     if next(wrapped) then unwrapAll() end
                     txt = 'Idle'
                 else
@@ -7310,8 +7321,9 @@ if HUB_CURRENT ~= 'roguecopy' then
                         wrapTypes(M)
                         if live.kind == 'sprint' then
                             txt = ('Sprint boost: %.1f -> %.1f studs/s (%.2fx)'):format(live.speed, live.speed * live.k, live.k)
-                        elseif live.kind == 'dribble' then
-                            txt = ('Dribble boost: %.1f -> %.1f studs/s (%.2fx)'):format(live.speed, live.speed * live.k, live.k)
+                        elseif live.kind == 'dribble' or live.kind == 'stepback' then
+                            txt = ('%s boost: %.1f -> %.1f studs/s (%.2fx)'):format(live.kind == 'stepback' and 'Stepback' or 'Dribble',
+                                live.speed, live.speed * live.k, live.k)
                         else
                             txt = ('Armed - %.1f studs/s'):format(live.speed)
                         end

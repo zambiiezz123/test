@@ -7333,6 +7333,105 @@ if HUB_CURRENT ~= 'roguecopy' then
             end))
         end)()
 
+        -- ===== Shot probe: who simulates the ball in flight ================
+        -- Make / miss is rolled on the SERVER before the ball flies: Shared/Config/
+        -- Game/Basketball lists Makes = RimIn / BackRimAroundIn / BackRimIn /
+        -- RimBounceIn and Misses = RimOut / BackRimAroundOut / BackRimOut, scripted
+        -- paths the server plays by setting the ball's velocity in stages. Scoring is
+        -- server-side (the hoops carry PreGoal + Goal parts no client script reads).
+        -- The one open question for a client lever: during that flight, does YOUR
+        -- client own the ball's physics? Read-only: this only watches and prints.
+        ;(function()
+            local ProbeBox = Tab:AddLeftGroupbox('Shot Probe')
+            ProbeBox:AddLabel('Read-only test. After each of your shots it prints to the console whether your client owned the ball in flight, whether the ball passed the hoop, and the grade. Take a few shots (makes and misses) and send the [PB probe] lines.', true)
+            local ProbeStatus = ProbeBox:AddLabel('Idle', true)
+            ProbeBox:AddToggle('PBShotProbe', { Text = 'Shot probe', Default = false })
+            local CS = game:GetService('CollectionService')
+            local isOwner = isnetworkowner or is_network_owner
+            local run
+            local function setProbe(t) if ProbeStatus then pcall(ProbeStatus.SetText, ProbeStatus, t) end end
+            local function goalParts()
+                local list = {}
+                local hoops = workspace:FindFirstChild('Hoops')
+                for _, d in ipairs(hoops and hoops:GetDescendants() or {}) do
+                    if d:IsA('BasePart') and (d.Name == 'Goal' or d.Name == 'PreGoal') then list[#list + 1] = d end
+                end
+                return list
+            end
+            local function inside(part, pos, pad)
+                local lp = part.CFrame:PointToObjectSpace(pos)
+                local h = part.Size / 2 + Vector3.new(pad, pad, pad)
+                return math.abs(lp.X) <= h.X and math.abs(lp.Y) <= h.Y and math.abs(lp.Z) <= h.Z
+            end
+            local function finish(r)
+                run = nil
+                local line = ('ball %s | owned by you %d/%d frames%s | anchored %d frames | closest to a hoop goal %.1f studs | touched PreGoal %s, Goal %s | grade %s'):format(
+                    r.ball.Name, r.owned, r.frames,
+                    r.firstOwned and (' (first %.2fs, last %.2fs after the meter)'):format(r.firstOwned, r.lastOwned) or '',
+                    r.anchored, r.minGoal, tostring(r.pre), tostring(r.goal), tostring(r.grade or '?'))
+                print('[PB probe] ' .. line)
+                setProbe(r.owned > 0 and 'You OWNED the ball in flight - send the console lines' or 'Server owned the ball (no client control) - see console')
+            end
+            local function start(char)
+                if not (Toggles.PBShotProbe and Toggles.PBShotProbe.Value) then return end
+                local ok, cf = pcall(char.GetPivot, char)
+                if not ok then return end
+                local ball, best
+                for _, b in ipairs(CS:GetTagged('Basketballs')) do
+                    if b:IsA('BasePart') then
+                        local d = (b.Position - cf.Position).Magnitude
+                        if not best or d < best then ball, best = b, d end
+                    end
+                end
+                if not ball then setProbe('No basketball found near you'); return end
+                run = { ball = ball, t0 = os.clock(), frames = 0, owned = 0, anchored = 0, minGoal = math.huge,
+                    pre = false, goal = false, goals = goalParts() }
+                if not isOwner then setProbe('Executor lacks isnetworkowner - ownership cannot be read') end
+                setProbe('Watching your shot...')
+            end
+            htrack(RunService.Heartbeat:Connect(function()
+                local r = run
+                if not r then return end
+                local t = os.clock() - r.t0
+                if t > 5 or not r.ball.Parent then finish(r); return end
+                local pos = r.ball.Position
+                r.frames = r.frames + 1
+                if r.ball.Anchored then r.anchored = r.anchored + 1 end
+                if isOwner then
+                    local okO, own = pcall(isOwner, r.ball)
+                    if okO and own then
+                        r.owned = r.owned + 1
+                        r.firstOwned = r.firstOwned or t
+                        r.lastOwned = t
+                    end
+                end
+                for _, g in ipairs(r.goals) do
+                    if g.Parent then
+                        r.minGoal = math.min(r.minGoal, (g.Position - pos).Magnitude)
+                        if inside(g, pos, 1) then
+                            if g.Name == 'Goal' then r.goal = true else r.pre = true end
+                        end
+                    end
+                end
+            end))
+            task.spawn(function()
+                local RS = game:GetService('ReplicatedStorage')
+                local aero = RS:WaitForChild('Aero', 60)
+                local ars = aero and aero:WaitForChild('AeroRemoteServices', 60)
+                if not ars then return end
+                local gp = ars:WaitForChild('GameplayService', 30)
+                local meter = gp and gp:WaitForChild('Meter', 30)
+                local ifs = ars:WaitForChild('InterfaceService', 30)
+                local fb = ifs and ifs:WaitForChild('ShowFeedback', 30)
+                if meter then htrack(meter.OnClientEvent:Connect(function(show, char)
+                    if show and typeof(char) == 'Instance' and char.Name == LocalPlayer.Name then start(char) end
+                end)) end
+                if fb then htrack(fb.OnClientEvent:Connect(function(char, _, grade)
+                    if run and typeof(char) == 'Instance' and char.Name == LocalPlayer.Name then run.grade = grade end
+                end)) end
+            end)
+        end)()
+
         -- ===== LOGIC: Auto Perfect Release ================================
         -- Grounded in the decompiled client (Controllers/Meter, Input/Keyboard,
         -- UI/Character/ShotFeedback, UI/LearnPB/Tutorial) + logged sessions:

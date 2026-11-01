@@ -7342,6 +7342,352 @@ if HUB_CURRENT ~= 'roguecopy' then
                 end
                 if txt ~= lastTxt then lastTxt = txt; setMoveStatus(txt) end
             end))
+
+            -- ===== Defense: auto guard (hold G) + auto block ==================
+            -- From the decompiled client (Movement.lua, Movement/Types/Guard.lua,
+            -- Input/Keyboard.lua, Controllers/Attributes.lua, Controllers/Meter.lua):
+            --  * G = InputService.HoldG({HoldingG = true/false}). While it is held
+            --    within 16.5 studs of an opposing ball handler, Movement:Update picks
+            --    the "Guard" movement type: it faces them by itself and moves you along
+            --    Movement.MoveDirection at your LateralSpeed.
+            --  * MoveDirection = Movement:calculateRawMoveVector(stick / WASD) made
+            --    camera-relative, sent to the server (InputService.MoveDirection) and fed
+            --    to the movement type. Mobile already gets a built-in guard assist
+            --    (ApplyGuardAssist): steer toward a spot 3.25 studs in front of the
+            --    handler, toward the goal they attack, at up to 42.5 %.
+            --  * Auto guard shadows calculateRawMoveVector on YOUR movement object only
+            --    and returns its own direction: the handler's velocity (copied) plus a
+            --    pull onto that spot, read slightly ahead. Speed, turning, animations and
+            --    the MoveDirection send all stay the game's own.
+            --  * Space with no ball = Shoot{Shoot=true, UseSpace=true, Input="E"} +
+            --    InputService.Jump(); key-up = Shoot{Shoot=false}. The server makes it a
+            --    block jump (Action "Blocking") and decides the block itself.
+            --  * Every player's meter streams to ALL clients as meterOffset on their
+            --    character (one update per server frame, frozen at their release), and
+            --    Action / Team / Basketball / Goal / Blocks sit in their Attributes
+            --    folder (Controllers/Attributes keeps them as plain tables). Auto block
+            --    learns how long shooters hold (meter start -> freeze) and jumps that long
+            --    after a nearby opponent's meter starts, minus your lead and round trip.
+            ;(function()
+                local DefBox = Tab:AddLeftGroupbox('Defense')
+                DefBox:AddLabel('Auto guard steers you while you hold G (the game\'s own guard movement does the moving). Auto block jumps for you when an opponent near you shoots.', true)
+                local DefStatus = DefBox:AddLabel('Idle', true)
+                DefBox:AddToggle('PBAutoGuard', { Text = 'Auto guard (hold G)', Default = false,
+                    Tooltip = 'Hold G next to the ball handler: you copy their movement and stay between them and the hoop they attack. Turn it on, then just hold G.' })
+                    :AddKeyPicker('PBAutoGuardKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto guard' })
+                DefBox:AddSlider('PBGuardStrength', { Text = 'Guard control', Default = 100, Min = 30, Max = 100, Rounding = 0, Suffix = ' %',
+                    Tooltip = '100% = fully automatic. Lower lets your own WASD pull against it.' })
+                DefBox:AddSlider('PBGuardGap', { Text = 'Stay in front by', Default = 3.25, Min = 2, Max = 6, Rounding = 2, Suffix = ' studs',
+                    Tooltip = 'How far in front of the handler (toward the hoop they attack) you hold. 3.25 is what the game\'s own mobile guard assist uses.' })
+                DefBox:AddSlider('PBGuardRead', { Text = 'Read ahead', Default = 0.12, Min = 0, Max = 0.3, Rounding = 2, Suffix = ' s',
+                    Tooltip = 'You see other players slightly in the past, so aim where the handler will be this far ahead. Raise it if quick moves still get by, lower it if you overshoot.' })
+                DefBox:AddToggle('PBAutoBlock', { Text = 'Auto block', Default = false,
+                    Tooltip = 'When an opponent within range shoots, dunks or goes up for a contact layup, you jump, timed to their release. Only while you do not have the ball and are free to jump.' })
+                    :AddKeyPicker('PBAutoBlockKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto block' })
+                DefBox:AddSlider('PBBlockRange', { Text = 'Block range', Default = 10, Min = 4, Max = 16, Rounding = 1, Suffix = ' studs' })
+                DefBox:AddSlider('PBBlockLead', { Text = 'Jump before release', Default = 0.2, Min = 0, Max = 0.45, Rounding = 2, Suffix = ' s',
+                    Tooltip = 'How long before the shooter lets go your jump should reach the server. Once 3 auto jumps have got blocks (with learning on), the timing of those blocks takes over.' })
+                DefBox:AddToggle('PBBlockLearn', { Text = 'Learn from my blocks', Default = true,
+                    Tooltip = 'An auto jump that gets a block (your Blocks stat goes up) is remembered with how early it was, and later jumps copy that timing.' })
+                DefBox:AddToggle('PBBlockLog', { Text = 'Log blocks (console)', Default = false })
+
+                local function blog(msg) if on('PBBlockLog') then print('[PB block] ' .. msg) end end
+                local function ms(x) return math.floor(x * 1000 + 0.5) end
+                local function rtt()
+                    local ok, v = pcall(function() return StatsSvc.Network.ServerStatsItem['Data Ping']:GetValue() end)
+                    return (ok and type(v) == 'number' and v > 0) and v / 1000 or 0.1
+                end
+                local function median(list, fallback)
+                    if #list == 0 then return fallback end
+                    local c = table.clone(list)
+                    table.sort(c)
+                    return c[math.floor((#c + 1) / 2)]
+                end
+                local function flat(v) return Vector3.new(v.X, 0, v.Z) end
+
+                -- Inputs + every player's attributes (the game's own tables).
+                local RS = game:GetService('ReplicatedStorage')
+                local remotes = {}
+                local function inputRemote(name)
+                    local r = remotes[name]
+                    if r and r.Parent then return r end
+                    local ok, x = pcall(function() return RS.Aero.AeroRemoteServices.InputService[name] end)
+                    r = (ok and typeof(x) == 'Instance' and x:IsA('RemoteEvent')) and x or nil
+                    remotes[name] = r
+                    return r
+                end
+                local attrCtl, attrTry = nil, -1e9
+                local function attrsOf(model)
+                    if not attrCtl and os.clock() - attrTry > 5 then
+                        attrTry = os.clock()
+                        local ok, A = pcall(function() return require(LocalPlayer.PlayerScripts.Aero.Controllers.Attributes) end)
+                        if ok and type(A) == 'table' and type(rawget(A, 'objects')) == 'table' then attrCtl = A end
+                    end
+                    local t = attrCtl and attrCtl.objects[model]
+                    if t then return t end
+                    local folder = model:FindFirstChild('Attributes')
+                    if not folder then return nil end
+                    t = {}
+                    for _, v in ipairs(folder:GetChildren()) do
+                        if v:IsA('ValueBase') then t[v.Name] = v.Value end
+                    end
+                    return t
+                end
+                local function charsFolder() return workspace:FindFirstChild('Characters') end
+                local function myModel() local c = charsFolder(); return c and c:FindFirstChild(LocalPlayer.Name) end
+                -- Same rule as the game's GetNearestPlayer "Opposite".
+                local function isFoe(a, mine) return a.Team ~= mine.Team or mine.Team == 0 end
+                local function goalPos(a)
+                    local g = a and a.Goal
+                    if typeof(g) ~= 'Instance' then return nil end
+                    local ok, p = pcall(function() return g.Position end)
+                    return (ok and typeof(p) == 'Vector3') and p or nil
+                end
+
+                -- ---- auto guard --------------------------------------------------
+                local GUARD_KP = 3     -- 1/s: how hard the gap to the guard spot is closed
+                local GUARD_VMAX = 15  -- studs/s that counts as a full stick
+                local track = setmetatable({}, { __mode = 'k' }) -- [handler root] = { p, t, v }
+                local guardInfo = {}   -- written on the game thread (plain values only)
+                local function steer(M, raw)
+                    guardInfo.name = nil
+                    local st = rawget(M, 'State')
+                    if not st or not st:GetAttribute('HoldingG') or st:GetAttribute('Basketball') then return raw end
+                    local act = st:GetAttribute('Action')
+                    if act ~= nil and act ~= '' and act ~= 'Stealing' then return raw end
+                    local mt = rawget(M, 'CurrentMovementType')
+                    if mt ~= 'Guard' and mt ~= 'Base' then return raw end
+                    local h = M:GetNearestPlayer(true, 20, 'Opposite', false)
+                    local hr = h and h.joints and h.joints.HumanoidRootPart and h.joints.HumanoidRootPart.object
+                    local gp = h and goalPos(h.attributes)
+                    local root = rawget(M, 'Root')
+                    if not (typeof(hr) == 'Instance' and gp and typeof(root) == 'Instance') then return raw end
+                    -- the handler's velocity, smoothed over ~0.08 s
+                    local now, hp = os.clock(), flat(hr.Position)
+                    local tr = track[hr]
+                    if not tr or now - tr.t > 0.3 then
+                        tr = { p = hp, t = now, v = Vector3.zero }
+                        track[hr] = tr
+                    elseif now > tr.t then
+                        local inst = (hp - tr.p) / (now - tr.t)
+                        if inst.Magnitude > 30 then inst = inst.Unit * 30 end
+                        tr.v = tr.v:Lerp(inst, math.clamp((now - tr.t) / 0.08, 0, 1))
+                        tr.p, tr.t = hp, now
+                    end
+                    -- the spot in front of where they will be, toward the hoop they attack
+                    local ahead = hp + tr.v * Options.PBGuardRead.Value
+                    local toGoal = flat(gp) - ahead
+                    if toGoal.Magnitude < 0.5 then return raw end
+                    local spot = ahead + toGoal.Unit * Options.PBGuardGap.Value
+                    local err = spot - flat(root.Position)
+                    -- copy their velocity, plus close the gap to the spot
+                    local want = tr.v + err * GUARD_KP
+                    local auto = Vector3.zero
+                    if want.Magnitude > 0.6 then auto = want.Unit * math.min(want.Magnitude / GUARD_VMAX, 1) end
+                    guardInfo.name, guardInfo.err = (h.model and h.model.Name) or '?', err.Magnitude
+                    if raw.Magnitude < 0.05 then return auto end
+                    local w = Options.PBGuardStrength.Value / 100
+                    return raw * (1 - w) + auto * w
+                end
+                local guardM, guardFn
+                local function unwrapGuard()
+                    if guardM and rawget(guardM, 'calculateRawMoveVector') == guardFn then
+                        rawset(guardM, 'calculateRawMoveVector', nil)
+                    end
+                    guardM, guardFn = nil, nil
+                    guardInfo.name = nil
+                end
+                local function wrapGuard(M)
+                    if guardM == M and rawget(M, 'calculateRawMoveVector') == guardFn then return end
+                    unwrapGuard()
+                    if rawget(M, 'calculateRawMoveVector') ~= nil then return end -- someone else's shadow: leave it
+                    local orig = M.calculateRawMoveVector
+                    if type(orig) ~= 'function' then return end
+                    local fn
+                    fn = function(self, input)
+                        local raw = orig(self, input)
+                        if self ~= guardM or typeof(raw) ~= 'Vector3' or not on('PBAutoGuard') then return raw end
+                        local ok, out = pcall(steer, self, raw)
+                        return (ok and typeof(out) == 'Vector3') and out or raw
+                    end
+                    rawset(M, 'calculateRawMoveVector', fn)
+                    guardM, guardFn = M, fn
+                end
+                htrack({ Disconnect = unwrapGuard })
+
+                -- ---- auto block ----------------------------------------------------
+                local foes = {}        -- [model] = meter watch { conn, t0, tLast, n, jumped, done, near }
+                local acts = {}        -- [model] = { a = Action, t = since, jumped }
+                local relHist = { near = {}, far = {} } -- how long shooters held: meter start -> freeze (s)
+                local attempts = {}    -- recent auto jumps { t, model, name, rel }
+                local okBlocks = {}    -- auto jumps that got a block: jump time minus their release (s)
+                local jumps, blocks, lastBlocks, lastJump = 0, 0, nil, -1e9
+                local watching = false
+                local function watch(model)
+                    if foes[model] or not model:IsA('Model') then return end
+                    local f = { n = 0 }
+                    f.conn = model:GetAttributeChangedSignal('meterOffset'):Connect(function()
+                        local now = os.clock()
+                        if not f.tLast or now - f.tLast > 0.25 then
+                            f.t0, f.n, f.jumped, f.done, f.near = now, 0, false, false, nil
+                        end
+                        f.n, f.tLast = f.n + 1, now
+                    end)
+                    foes[model] = f
+                end
+                local function unwatch(model)
+                    local f = foes[model]
+                    if f and f.conn then pcall(function() f.conn:Disconnect() end) end
+                    foes[model], acts[model] = nil, nil
+                end
+                local function ensureWatch()
+                    if watching then return end
+                    local c = charsFolder()
+                    if not c then return end
+                    watching = true
+                    for _, m in ipairs(c:GetChildren()) do watch(m) end
+                    htrack(c.ChildAdded:Connect(watch))
+                    htrack(c.ChildRemoved:Connect(unwatch))
+                end
+                htrack({ Disconnect = function() for m in pairs(foes) do unwatch(m) end end })
+                -- A Space tap with no ball, exactly as Keyboard.lua sends it.
+                local function blockJump()
+                    local sh, jp = inputRemote('Shoot'), inputRemote('Jump')
+                    if not (sh and jp) then return false end
+                    lastJump = os.clock()
+                    pcall(function() sh:FireServer({ Shoot = true, UseSpace = true, Input = 'E' }) end)
+                    pcall(function() jp:FireServer() end)
+                    task.delay(0.12, function() pcall(function() sh:FireServer({ Shoot = false }) end) end)
+                    return true
+                end
+                -- Lead (s) before their release; learned from blocks once there are 3.
+                local function leadNow(r)
+                    if on('PBBlockLearn') and #okBlocks >= 3 then
+                        return math.clamp(-median(okBlocks, 0) - r, 0, 0.45), true
+                    end
+                    return Options.PBBlockLead.Value, false
+                end
+                htrack(RunService.Heartbeat:Connect(function()
+                    if not on('PBAutoBlock') then return end
+                    ensureWatch()
+                    local me = myModel()
+                    local mine = me and attrsOf(me)
+                    if not mine then return end
+                    local now = os.clock()
+                    -- Did an auto jump just get a block? (my Blocks stat went up)
+                    local b = tonumber(mine.Blocks)
+                    if b and lastBlocks and b > lastBlocks then
+                        local a = attempts[#attempts]
+                        if a and now - a.t < 2.5 then
+                            blocks = blocks + 1
+                            if a.rel then
+                                okBlocks[#okBlocks + 1] = a.t - a.rel
+                                while #okBlocks > 15 do table.remove(okBlocks, 1) end
+                            end
+                            blog(('BLOCK on %s%s'):format(a.name, a.rel and (' - your jump went out %d ms %s their release'):format(
+                                math.abs(ms(a.t - a.rel)), a.t > a.rel and 'after' or 'before') or ''))
+                        end
+                    end
+                    if b then lastBlocks = b end
+                    -- Shooters' releases (meter froze): learn how long they hold.
+                    for model, f in pairs(foes) do
+                        if f.t0 and not f.done and now - f.tLast > 0.07 then
+                            f.done = true
+                            if model ~= me and f.n >= 4 then
+                                if f.near == nil then
+                                    local a = attrsOf(model)
+                                    local gp, root = goalPos(a), model:FindFirstChild('HumanoidRootPart')
+                                    f.near = gp ~= nil and root ~= nil and (flat(gp) - flat(root.Position)).Magnitude < 9
+                                end
+                                local R = f.tLast - f.t0
+                                if R > 0.15 and R < 1.2 then
+                                    local h = relHist[f.near and 'near' or 'far']
+                                    h[#h + 1] = R
+                                    while #h > 30 do table.remove(h, 1) end
+                                end
+                                for i = #attempts, 1, -1 do
+                                    local a = attempts[i]
+                                    if a.model == model and not a.rel and now - a.t < 2 then
+                                        a.rel = f.tLast
+                                        blog(('%s released %d ms after their meter started; your jump went out %d ms %s it'):format(
+                                            a.name, ms(R), math.abs(ms(a.t - a.rel)), a.t > a.rel and 'after' or 'before'))
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    -- Free to jump?
+                    if mine.Basketball or (mine.Action ~= nil and mine.Action ~= '') or mine.SeatCFrame then return end
+                    if now - lastJump < 0.8 then return end
+                    local myRoot = me:FindFirstChild('HumanoidRootPart')
+                    if not myRoot then return end
+                    local myPos, range, r = myRoot.Position, Options.PBBlockRange.Value, rtt()
+                    local lead = leadNow(r)
+                    for model, f in pairs(foes) do
+                        local a = model ~= me and model.Parent and attrsOf(model)
+                        local root = a and model:FindFirstChild('HumanoidRootPart')
+                        if root and isFoe(a, mine) then
+                            local act = a.Action
+                            local st = acts[model]
+                            if not st or st.a ~= act then st = { a = act, t = now }; acts[model] = st end
+                            local dist = (root.Position - myPos).Magnitude
+                            if dist <= range then
+                                local due, kind
+                                if f.t0 and not f.done and not f.jumped and now - f.tLast < 0.06 then
+                                    -- a jumper: their meter is filling right now
+                                    if f.near == nil then
+                                        local gp = goalPos(a)
+                                        f.near = gp ~= nil and (flat(gp) - flat(root.Position)).Magnitude < 9
+                                    end
+                                    due, kind = f.t0 + median(relHist[f.near and 'near' or 'far'], 0.4) - lead - r, 'shot'
+                                elseif (act == 'Dunking' or act == 'ContactLayup') and not st.jumped then
+                                    due, kind = st.t, act
+                                elseif act == 'Shooting' and not st.jumped and now - st.t > 0.1
+                                    and not (f.t0 and f.t0 > st.t - 0.5) then
+                                    -- shooting with no meter for this shot (meter type None)
+                                    due, kind = st.t + median(relHist.far, 0.4) - lead - r, 'shot, no meter'
+                                end
+                                if due and now >= due and blockJump() then
+                                    f.jumped, st.jumped = true, true
+                                    jumps = jumps + 1
+                                    attempts[#attempts + 1] = { t = now, model = model, name = model.Name }
+                                    while #attempts > 10 do table.remove(attempts, 1) end
+                                    blog(('jumped on %s (%s, %.1f studs away)%s'):format(model.Name, kind, dist,
+                                        kind == 'shot' and (', %d ms after their meter started'):format(ms(now - f.t0)) or ''))
+                                    return
+                                end
+                            end
+                        end
+                    end
+                end))
+
+                -- Status + keeping the guard shadow on your current movement object.
+                local acc2, lastTxt2 = 0, nil
+                htrack(RunService.Heartbeat:Connect(function(dt)
+                    acc2 = acc2 + dt
+                    if acc2 < 0.25 then return end
+                    acc2 = 0
+                    local lines = {}
+                    if on('PBAutoGuard') then
+                        local M = findMovement()
+                        if M then wrapGuard(M) end
+                        lines[#lines + 1] = (not M and 'Guard: waiting for your character')
+                            or (guardInfo.name and ('Guard: on %s (%.1f studs off the spot)'):format(guardInfo.name, guardInfo.err or 0))
+                            or 'Guard: armed - hold G next to the ball handler'
+                    elseif guardM then
+                        unwrapGuard()
+                    end
+                    if on('PBAutoBlock') then
+                        local lead, learned = leadNow(rtt())
+                        lines[#lines + 1] = ('Block: %s blocked / %d jumps | lead %d ms%s | shooters hold ~%.2f s'):format(
+                            lastBlocks ~= nil and tostring(blocks) or 'n/a', jumps, ms(lead), learned and ' (learned)' or '',
+                            median(relHist.far, 0.4))
+                    end
+                    local txt = (#lines > 0) and table.concat(lines, '\n') or 'Idle'
+                    if txt ~= lastTxt2 then lastTxt2 = txt; pcall(DefStatus.SetText, DefStatus, txt) end
+                end))
+            end)()
         end)()
 
         -- ===== LOGIC: Auto Perfect Release ================================

@@ -7097,7 +7097,7 @@ if HUB_CURRENT ~= 'roguecopy' then
         local HttpService = game:GetService('HttpService')
         local StatsSvc    = game:GetService('Stats')
         local PLACE_NAMES = { [115776365257536] = 'Plaza', [119587547774646] = 'Private Gym', [118669925076970] = 'Park' }
-        local resetCalib -- forward-declared for the button
+        local resetCalib, exportCalib, importCalib -- forward-declared for the buttons
 
         local Tab = Window:AddTab('PracticalBB')
 
@@ -7132,6 +7132,12 @@ if HUB_CURRENT ~= 'roguecopy' then
         MeterBox:AddToggle('PBMeterLog', { Text = 'Log meter (console)', Default = false,
             Tooltip = 'Print every shot: meter type, fill updates, where the release went out, where the server froze the bar, the landing delay, the grade and the next aim. Works with Auto off too.' })
         MeterBox:AddButton({ Text = 'Reset calibration', Func = function() if resetCalib then resetCalib() end end })
+        MeterBox:AddButton({ Text = 'Copy calibration code', Func = function() if exportCalib then exportCalib() end end })
+        MeterBox:AddInput('PBCalibCode', { Text = 'Paste calibration code', Default = '', Finished = false, Placeholder = 'PBM1...',
+            Tooltip = 'Paste a code from "Copy calibration code" (yours or a friend\'s), then press Load. It replaces the meter memory on this hub.' })
+        MeterBox:AddButton({ Text = 'Load pasted code', Func = function()
+            if importCalib then importCalib(Options.PBCalibCode and Options.PBCalibCode.Value) end
+        end })
 
         -- ===== UI: Info ===================================================
         local InfoBox = Tab:AddRightGroupbox('PracticalBB')
@@ -7844,10 +7850,15 @@ if HUB_CURRENT ~= 'roguecopy' then
             return c
         end
         local calib = freshCalib()
-        pcall(function()
-            if not (isfile and isfile(CALIB_FILE)) then return end
-            local t = HttpService:JSONDecode(readfile(CALIB_FILE))
-            if type(t) ~= 'table' or t.v ~= 3 or type(t.types) ~= 'table' then return end -- older format: start from the seed
+        -- Saved with the executor's file functions. Executors differ: some lack
+        -- isfile / isfolder / makefolder, or cannot write into a sub-folder, so
+        -- every step is tried on its own and a flat file in the workspace root is
+        -- the fallback. storeNote tells the player when nothing can be saved.
+        local CALIB_FLAT = 'GameHub_practicalbb_meter_calibration.json'
+        local storeNote = (not writefile) and 'Not saved: your executor has no writefile' or nil
+        -- Merge a decoded calibration table into calib; true if it was usable.
+        local function applyCalib(t)
+            if type(t) ~= 'table' or t.v ~= 3 or type(t.types) ~= 'table' then return false end -- older format: keep the seed
             calib.adj = math.clamp(tonumber(t.adj) or calib.adj, -0.15, 0.15)
             for k, e in pairs(t.types) do
                 if type(k) == 'string' and type(e) == 'table' and type(e.s) == 'table' then
@@ -7856,15 +7867,46 @@ if HUB_CURRENT ~= 'roguecopy' then
                         local f, g = type(smp) == 'table' and tonumber(smp[1]), type(smp) == 'table' and tonumber(smp[2])
                         if f and g and g >= 1 and g <= 8 then list[#list + 1] = { f, g } end
                     end
+                    while #list > MAX_SAMPLES do table.remove(list, 1) end
                     calib.types[k] = { s = list, shots = tonumber(e.shots) or 0, perfects = tonumber(e.perfects) or 0 }
                 end
             end
-        end)
+            return true
+        end
+        local function readCalibFile(path)
+            if not readfile then return nil end
+            if isfile then
+                local okE, exists = pcall(isfile, path)
+                if okE and not exists then return nil end
+            end
+            local ok, raw = pcall(readfile, path)
+            if not ok or type(raw) ~= 'string' or raw == '' then return nil end
+            local okJ, t = pcall(function() return HttpService:JSONDecode(raw) end)
+            return okJ and t or nil
+        end
+        if not applyCalib(readCalibFile(CALIB_FILE)) then applyCalib(readCalibFile(CALIB_FLAT)) end
         local function saveCalib()
-            pcall(function()
-                if makefolder and isfolder and not isfolder(CALIB_DIR) then makefolder(CALIB_DIR) end
-                if writefile then writefile(CALIB_FILE, HttpService:JSONEncode(calib)) end
-            end)
+            if not writefile then
+                storeNote = 'Not saved: your executor has no writefile'
+                return
+            end
+            local okJ, data = pcall(function() return HttpService:JSONEncode(calib) end)
+            if not okJ then return end
+            if makefolder then
+                local hasFolder = false
+                if isfolder then
+                    local okF, r = pcall(isfolder, CALIB_DIR)
+                    hasFolder = okF and r
+                end
+                if not hasFolder then pcall(makefolder, CALIB_DIR) end
+            end
+            if pcall(writefile, CALIB_FILE, data) then
+                storeNote = nil
+            elseif pcall(writefile, CALIB_FLAT, data) then
+                storeNote = nil
+            else
+                storeNote = 'Not saved: your executor refused to write the file'
+            end
         end
         local function typeKey(mtype) return (type(mtype) == 'string' and mtype ~= '') and mtype or 'Unknown' end
         local function entryFor(mtype)
@@ -7927,12 +7969,12 @@ if HUB_CURRENT ~= 'roguecopy' then
                 end
                 res = ('\nLast %d timed releases: %d Perfect, %d early, %d late'):format(#recent, p, early, late)
             end
-            setText(CalibLabel, ('%s meter: aim %s%s\nLead %s ms (ping %s ms, measured correction %+d ms)\n%d shots learned (%d perfect), %d spots in memory%s%s'):format(
+            setText(CalibLabel, ('%s meter: aim %s%s\nLead %s ms (ping %s ms, measured correction %+d ms)\n%d shots learned (%d perfect), %d spots in memory%s%s%s'):format(
                 shownType, a and f3(a + trimNow()) or 'none yet',
                 (lo and hi) and (' (Perfect ~%s - %s)'):format(f3(lo), f3(hi)) or '',
                 ms(leadFor(r)), ms(r), math.floor(calib.adj * 1000 + 0.5),
                 e and e.shots or 0, e and e.perfects or 0, e and #e.s or 0, res,
-                lastPrec and ('\n' .. lastPrec) or ''))
+                lastPrec and ('\n' .. lastPrec) or '', storeNote and ('\n' .. storeNote) or ''))
         end
         showCalib()
         resetCalib = function()
@@ -7940,6 +7982,86 @@ if HUB_CURRENT ~= 'roguecopy' then
             table.clear(recent); srvRef, lastPrec = nil, nil
             saveCalib(); showCalib()
             Library:Notify('Meter calibration reset to the built-in starting point', 3)
+        end
+        -- Share a calibration as a short code: PBM1.<adj ms>.<Type>-<shots>-<perfects>-<spots>
+        -- with every remembered spot packed into 4 base-36 characters
+        -- ((frozen spot + 10) in thousandths x 10 + grade). ~170 chars for 40 spots.
+        local B36 = '0123456789abcdefghijklmnopqrstuvwxyz'
+        local function b36(n, width)
+            local s = ''
+            for _ = 1, width do
+                local d = n % 36
+                s = B36:sub(d + 1, d + 1) .. s
+                n = math.floor(n / 36)
+            end
+            return s
+        end
+        local function unb36(s)
+            local n = 0
+            for i = 1, #s do
+                local d = B36:find(s:sub(i, i), 1, true)
+                if not d then return nil end
+                n = n * 36 + d - 1
+            end
+            return n
+        end
+        local function calibCode()
+            local parts = { 'PBM1', tostring(math.floor(calib.adj * 1000 + 0.5)) }
+            for k, e in pairs(calib.types) do
+                if #e.s > 0 and k:match('^%w+$') then
+                    local buf = {}
+                    for _, smp in ipairs(e.s) do
+                        local f = math.clamp(math.floor((smp[1] + 10) * 1000 + 0.5), 0, 160000)
+                        buf[#buf + 1] = b36(f * 10 + math.clamp(smp[2], 1, 8), 4)
+                    end
+                    parts[#parts + 1] = ('%s-%d-%d-%s'):format(k, e.shots or 0, e.perfects or 0, table.concat(buf))
+                end
+            end
+            return table.concat(parts, '.')
+        end
+        local function parseCalibCode(code)
+            local parts = string.split(code, '.')
+            if parts[1] ~= 'PBM1' or not tonumber(parts[2]) then return nil end
+            local t = { v = 3, adj = tonumber(parts[2]) / 1000, types = {} }
+            for i = 3, #parts do
+                local k, shots, perf, data = parts[i]:match('^(%w+)%-(%d+)%-(%d+)%-(%w+)$')
+                if not k or #data % 4 ~= 0 then return nil end
+                local s = {}
+                for j = 1, #data, 4 do
+                    local n = unb36(data:sub(j, j + 3))
+                    if not n then return nil end
+                    local g = n % 10
+                    s[#s + 1] = { math.floor((n - g) / 10 + 0.5) / 1000 - 10, g }
+                end
+                t.types[k] = { s = s, shots = tonumber(shots), perfects = tonumber(perf) }
+            end
+            return t
+        end
+        exportCalib = function()
+            local code = calibCode()
+            print('[PB meter] calibration code: ' .. code)
+            if setclipboard and pcall(setclipboard, code) then
+                Library:Notify(('Calibration code copied (%d characters) - send it to your friend'):format(#code), 5)
+            else
+                Library:Notify('No setclipboard on this executor - the code is printed in the console (F9)', 6)
+            end
+        end
+        importCalib = function(text)
+            text = tostring(text or ''):gsub('%s', '')
+            if text == '' then Library:Notify('Paste a calibration code first', 3); return end
+            local t = parseCalibCode(text)
+            if not t then -- also accept the raw JSON of a saved calibration file
+                local ok, j = pcall(function() return HttpService:JSONDecode(text) end)
+                t = ok and j or nil
+            end
+            if type(t) ~= 'table' or t.v ~= 3 then
+                Library:Notify('That is not a calibration code (copy one with "Copy calibration code")', 4)
+                return
+            end
+            calib = freshCalib()
+            applyCalib(t)
+            saveCalib(); showCalib()
+            Library:Notify(storeNote and ('Calibration loaded for this session only. ' .. storeNote) or 'Calibration loaded and saved', 5)
         end
 
         -- My fighter = workspace.Characters[<my name>] (Components/Character.lua).

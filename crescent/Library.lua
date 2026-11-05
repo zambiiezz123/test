@@ -585,56 +585,105 @@ function Library:MakeDraggable(Instance, Cutoff)
 end
 
 -- ============================================================================
--- Smooth scrolling. The ScrollingFrame keeps its native wheel handling (so the
--- wheel never also zooms the camera); each native jump is turned into a target
--- and the canvas glides there.
+-- Smooth scrolling. The mouse wheel is read directly (every notch counts, quick
+-- notches speed up) and the canvas glides to its target. The ScrollingFrame keeps
+-- ScrollingEnabled so the wheel never also zooms the camera, but its own jumps
+-- are put back every frame (before anything is drawn). Reading those jumps
+-- through CanvasPosition's changed signal lost notches in games that defer
+-- signals, so it is not used.
 -- ============================================================================
-local Scrollers = {}
+local WHEEL_STEP = 80
+local Scrollers = {}    -- gliding right now
+local ScrollList = {}   -- every smooth scroller, newest last
 local function smoothScroll(sf, onUpdate)
-    local st = { sf = sf, cur = sf.CanvasPosition.Y, target = sf.CanvasPosition.Y, guard = false, onUpdate = onUpdate }
+    local y0 = sf.CanvasPosition.Y
+    local st = { sf = sf, cur = y0, target = y0, lastSet = y0, onUpdate = onUpdate }
     function st.maxY()
         local s = curScale()
         if s <= 0 then s = 1 end
         return max(0, (sf.AbsoluteCanvasSize.Y - sf.AbsoluteWindowSize.Y) / s)
     end
     function st.set(y)
-        st.guard = true
+        st.lastSet = y
         sf.CanvasPosition = V2(0, y)
-        st.guard = false
     end
-    sf:GetPropertyChangedSignal('CanvasPosition'):Connect(function()
-        if st.guard then return end
-        local y = sf.CanvasPosition.Y
-        local d = y - st.cur
-        if abs(d) < 0.01 then return end
-        if not Prefs.animations then
-            st.cur, st.target = y, y
-            if onUpdate then onUpdate() end
-            return
-        end
-        st.target = clamp(st.target + d, 0, st.maxY())
-        st.set(st.cur)
-        Scrollers[st] = true
-    end)
+    table.insert(ScrollList, st)
     return st
 end
 
+local function shownOnScreen(g)
+    while g and g ~= ScreenGui do
+        if Kind[g] == 1 and not g.Visible then return false end
+        g = g.Parent
+    end
+    return g == ScreenGui
+end
+
+-- the scroller under the mouse (an open dropdown list wins over the page)
+local function scrollerAt(m)
+    for i = #ScrollList, 1, -1 do
+        local st = ScrollList[i]
+        local sf = st.sf
+        if sf.Parent then
+            local p, s = sf.AbsolutePosition, sf.AbsoluteSize
+            if m.X >= p.X and m.X <= p.X + s.X and m.Y >= p.Y and m.Y <= p.Y + s.Y and shownOnScreen(sf) then
+                return st
+            end
+        end
+    end
+    return nil
+end
+
+local function wheel(dz)
+    local st = scrollerAt(mouse())
+    if not st then return end
+    local now = clock()
+    st.accel = (now - (st.lastWheel or -1) < 0.12) and min((st.accel or 1) + 0.35, 3) or 1
+    st.lastWheel = now
+    st.target = clamp(st.target - dz * WHEEL_STEP * st.accel, 0, st.maxY())
+    if Prefs.animations then
+        Scrollers[st] = true
+    else
+        st.cur = st.target
+        st.set(st.cur)
+        if st.onUpdate then pcall(st.onUpdate) end
+    end
+end
+
 local function stepScrollers(dt)
+    -- put back the ScrollingFrames' own moves; keep a drag of a visible scrollbar
+    -- and the clamp Roblox applies when the content gets shorter
+    for i = #ScrollList, 1, -1 do
+        local st = ScrollList[i]
+        local sf = st.sf
+        if not sf.Parent then
+            table.remove(ScrollList, i)
+            Scrollers[st] = nil
+        else
+            local y = sf.CanvasPosition.Y
+            if abs(y - st.lastSet) > 0.01 then
+                if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+                    or (y < st.lastSet and y >= st.maxY() - 0.5) then
+                    st.cur, st.target, st.lastSet = y, y, y
+                    Scrollers[st] = nil
+                    if st.onUpdate then pcall(st.onUpdate) end
+                else
+                    st.set(st.cur)
+                end
+            end
+        end
+    end
     if next(Scrollers) == nil then return end
     local k = 1 - exp(-dt * 16)
     for st in pairs(Scrollers) do
-        if not st.sf.Parent then
+        st.target = clamp(st.target, 0, st.maxY())
+        st.cur = st.cur + (st.target - st.cur) * k
+        if abs(st.target - st.cur) < 0.5 then
+            st.cur = st.target
             Scrollers[st] = nil
-        else
-            st.target = clamp(st.target, 0, st.maxY())
-            st.cur = st.cur + (st.target - st.cur) * k
-            if abs(st.target - st.cur) < 0.5 then
-                st.cur = st.target
-                Scrollers[st] = nil
-            end
-            st.set(st.cur)
-            if st.onUpdate then pcall(st.onUpdate) end
         end
+        st.set(st.cur)
+        if st.onUpdate then pcall(st.onUpdate) end
     end
 end
 
@@ -3152,6 +3201,11 @@ end
 
 local function onInputChanged(Input)
     if Library.Unloaded then return end
+    if Input.UserInputType == UIT.MouseWheel then
+        local dz = Input.Position.Z
+        if dz ~= 0 then pcall(wheel, dz) end
+        return
+    end
     if Drag and (Input.UserInputType == UIT.MouseMovement or Input.UserInputType == UIT.Touch) then
         local ok, err = pcall(Drag.move, mouse())
         if not ok then

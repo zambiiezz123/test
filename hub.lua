@@ -1,5 +1,5 @@
 --[[
-    Game test menu — built on LinoriaLib
+    Reverie — multi-game hub (menu library: Crescent, or LinoriaLib)
     Run this single script while loaded into your game.
 
     Movement : WalkSpeed, Fly, Noclip, Infinite Jump, Jump Power
@@ -46,7 +46,7 @@ do
         if ok and type(a) == 'table' and type(b) == 'table' and type(c) == 'table' then
             Library, ThemeManager, SaveManager = a, b, c
         else
-            warn('[Hub] Crescent did not load, using LinoriaLib instead: ' .. tostring(a))
+            warn('[Reverie] Crescent did not load, using LinoriaLib instead: ' .. tostring(a))
             local stray = getgenv().Library
             if type(stray) == 'table' and stray.Version and not stray.Unloaded then pcall(stray.Unload, stray) end
         end
@@ -137,7 +137,7 @@ do
         until os.clock() - t0 > 10
         if HUB_CURRENT == 'unknown' then how = 'none' end
     end
-    print(('[Hub] PlaceId=%d GameId(universe)=%d -> module: %s (matched by %s)'):format(pid, uid, HUB_CURRENT, how))
+    print(('[Reverie] PlaceId=%d GameId(universe)=%d -> module: %s (matched by %s)'):format(pid, uid, HUB_CURRENT, how))
 end
 
 -- Non-roguecopy games build their OWN self-contained menu here and RETURN, so
@@ -151,10 +151,10 @@ if HUB_CURRENT ~= 'roguecopy' then
     local function htrack(c) hubConns[#hubConns + 1] = c; return c end
 
     local Window = Library:CreateWindow({
-        Title = (HUB_CURRENT == 'forgottenstories') and 'Game Hub - Forgotten Stories'
-            or (HUB_CURRENT == 'slayers') and 'Game Hub - Slayers'
-            or (HUB_CURRENT == 'practicalbb') and 'Game Hub - PracticalBB'
-            or 'Game Hub - Universal',
+        Title = (HUB_CURRENT == 'forgottenstories') and 'Reverie - Forgotten Stories'
+            or (HUB_CURRENT == 'slayers') and 'Reverie - Slayers'
+            or (HUB_CURRENT == 'practicalbb') and 'Reverie - PracticalBB'
+            or 'Reverie - Universal',
         Center = true, AutoShow = true, TabPadding = 8, MenuFadeTime = 0.2,
     })
 
@@ -8442,7 +8442,7 @@ if HUB_CURRENT ~= 'roguecopy' then
     Library:OnUnload(function()
         for _, c in ipairs(hubConns) do pcall(function() c:Disconnect() end) end
         getgenv().GameTestMenu_Unload = nil
-        print('Game hub unloaded')
+        print('Reverie unloaded')
     end)
 
     ThemeManager:SetLibrary(Library)
@@ -8508,7 +8508,7 @@ end
 
 -- 3. Window / tabs -------------------------------------------------------------
 local Window = Library:CreateWindow({
-    Title = 'Game Hub - Rogue Lineage',
+    Title = 'Reverie - Rogue Lineage',
     Center = true,
     AutoShow = true,
     TabPadding = 8,
@@ -13597,7 +13597,7 @@ Library:OnUnload(function()
     if trinketCleanup then pcall(trinketCleanup) end -- remove trinket highlights + drawings
     if stopSpectate then pcall(stopSpectate) end -- put the camera back on us
     getgenv().GameTestMenu_Unload = nil
-    print('Game test menu unloaded')
+    print('Reverie unloaded')
 end)
 
 ThemeManager:SetLibrary(Library)

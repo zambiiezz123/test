@@ -1439,15 +1439,15 @@ function GroupFuncs:AddLabel(Text, DoesWrap)
     local row, lbl
     if DoesWrap then
         row = self:_row(nil, Text)
-        New('UIPadding', { PaddingBottom = UDim.new(0, 5), Parent = row })
+        New('UIPadding', { PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 7), Parent = row })
         lbl = New('TextLabel', {
             Position = fromOffset(GUTTER, 0), Size = UDim2new(1, -GUTTER, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
             TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-            LineHeight = 1.05, Parent = row,
+            LineHeight = 1.12, Parent = row,
         }, { TextColor3 = 'TextDim' })
     else
         local entry
-        row, entry = self:_row(17, Text)
+        row, entry = self:_row(20, Text)
         Label._search = entry
         lbl = New('TextLabel', {
             Position = fromOffset(GUTTER, 0), Size = UDim2new(1, -GUTTER, 1, 0), TextXAlignment = Enum.TextXAlignment.Left,
@@ -1488,8 +1488,8 @@ function GroupFuncs:AddButton(...)
     local Button = {}
     processButtonParams(Button, ...)
 
-    local row, entry = self:_row(25, Button.Text)
-    local strip = New('Frame', { BackgroundTransparency = 1, Position = fromOffset(GUTTER, 0), Size = UDim2new(1, -2 * GUTTER, 0, 20), Parent = row })
+    local row, entry = self:_row(29, Button.Text)
+    local strip = New('Frame', { BackgroundTransparency = 1, Position = fromOffset(GUTTER, 4), Size = UDim2new(1, -2 * GUTTER, 0, 20), Parent = row })
     New('UIListLayout', { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6), Parent = strip })
     local members = {}
 
@@ -1573,8 +1573,8 @@ function GroupFuncs:AddButton(...)
 end
 
 function GroupFuncs:AddDivider()
-    local row = self:_row(11, false)
-    New('Frame', { Position = fromOffset(GUTTER, 5), Size = UDim2new(1, -2 * GUTTER, 0, 1), Parent = row }, { BackgroundColor3 = 'Border' })
+    local row = self:_row(13, false)
+    New('Frame', { Position = fromOffset(GUTTER, 6), Size = UDim2new(1, -2 * GUTTER, 0, 1), Parent = row }, { BackgroundColor3 = 'Border' })
     return { Type = 'Divider' }
 end
 
@@ -1589,10 +1589,10 @@ function GroupFuncs:AddInput(Idx, Info)
         Callback = Info.Callback or function(Value) end,
     }
 
-    local row = self:_row(42, Info.Text)
-    local label = New('TextLabel', { Position = fromOffset(GUTTER, 0), Size = UDim2new(1, -GUTTER, 0, 15), TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row }, { TextColor3 = 'Text' })
+    local row = self:_row(46, Info.Text)
+    local label = New('TextLabel', { Position = fromOffset(GUTTER, 3), Size = UDim2new(1, -GUTTER, 0, 15), TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row }, { TextColor3 = 'Text' })
     setText(label, Info.Text)
-    local frame = New('Frame', { Position = fromOffset(GUTTER, 17), Size = UDim2new(1, -2 * GUTTER, 0, 20), ClipsDescendants = true, Parent = row }, { BackgroundColor3 = 'Element' })
+    local frame = New('Frame', { Position = fromOffset(GUTTER, 20), Size = UDim2new(1, -2 * GUTTER, 0, 20), ClipsDescendants = true, Parent = row }, { BackgroundColor3 = 'Element' })
     local stroke = New('UIStroke', { Parent = frame }, { Color = 'Border' })
     local box = New('TextBox', {
         Position = fromOffset(7, 0), Size = UDim2new(1, -14, 1, 0), Text = tostring(Textbox.Value),
@@ -1670,8 +1670,8 @@ function GroupFuncs:AddToggle(Idx, Info)
         Risky = Info.Risky,
     }
 
-    local row = self:_row(18, Info.Text)
-    local check = New('Frame', { Position = fromOffset(1, 5), Size = fromOffset(8, 8), Parent = row })
+    local row = self:_row(20, Info.Text)
+    local check = New('Frame', { Position = fromOffset(1, 6), Size = fromOffset(8, 8), Parent = row })
     local stroke = New('UIStroke', { Parent = check })
     New('UIGradient', { Rotation = 90, Color = ColorSequence.new(Color3.new(1, 1, 1), rgb(196, 196, 202)), Parent = check })
     local pop = New('UIScale', { Parent = check })
@@ -1760,17 +1760,17 @@ function GroupFuncs:AddSlider(Idx, Info)
         Callback = Info.Callback or function(Value) end,
     }
 
-    local row = self:_row(34, Info.Text)
-    local lbl = New('TextLabel', { Position = fromOffset(GUTTER, 0), Size = UDim2new(1, -GUTTER - 74, 0, 15), TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row }, { TextColor3 = 'Text' })
+    local row = self:_row(37, Info.Text)
+    local lbl = New('TextLabel', { Position = fromOffset(GUTTER, 3), Size = UDim2new(1, -GUTTER - 74, 0, 15), TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row }, { TextColor3 = 'Text' })
     setText(lbl, Info.Text)
-    local val = New('TextBox', { AnchorPoint = V2(1, 0), Position = UDim2new(1, -GUTTER, 0, 0), Size = fromOffset(72, 15), TextSize = 12, TextXAlignment = Enum.TextXAlignment.Right, Parent = row }, { TextColor3 = 'TextDim' })
-    local track = New('Frame', { Position = fromOffset(GUTTER, 21), Size = UDim2new(1, -2 * GUTTER, 0, 5), Parent = row }, { BackgroundColor3 = 'Element' })
+    local val = New('TextBox', { AnchorPoint = V2(1, 0), Position = UDim2new(1, -GUTTER, 0, 3), Size = fromOffset(72, 15), TextSize = 12, TextXAlignment = Enum.TextXAlignment.Right, Parent = row }, { TextColor3 = 'TextDim' })
+    local track = New('Frame', { Position = fromOffset(GUTTER, 24), Size = UDim2new(1, -2 * GUTTER, 0, 5), Parent = row }, { BackgroundColor3 = 'Element' })
     local tStroke = New('UIStroke', { Parent = track }, { Color = 'Border' })
     local fill = New('Frame', { Size = fromScale(0, 1), Parent = track }, { BackgroundColor3 = 'Accent' })
     New('UIGradient', { Rotation = 90, Color = ColorSequence.new(Color3.new(1, 1, 1), rgb(200, 200, 206)), Parent = fill })
-    local hit = New('TextButton', { BackgroundTransparency = 1, Text = '', Position = fromOffset(GUTTER - 3, 16), Size = UDim2new(1, -2 * GUTTER + 6, 0, 15), ZIndex = 2, Parent = row })
-    local minus = New('TextButton', { BackgroundTransparency = 1, Text = '-', TextSize = 14, Position = fromOffset(0, 16), Size = fromOffset(GUTTER - 3, 15), Parent = row }, { TextColor3 = 'TextMuted' })
-    local plus = New('TextButton', { BackgroundTransparency = 1, Text = '+', TextSize = 13, AnchorPoint = V2(1, 0), Position = UDim2new(1, 0, 0, 16), Size = fromOffset(GUTTER - 3, 15), Parent = row }, { TextColor3 = 'TextMuted' })
+    local hit = New('TextButton', { BackgroundTransparency = 1, Text = '', Position = fromOffset(GUTTER - 3, 19), Size = UDim2new(1, -2 * GUTTER + 6, 0, 15), ZIndex = 2, Parent = row })
+    local minus = New('TextButton', { BackgroundTransparency = 1, Text = '-', TextSize = 14, Position = fromOffset(0, 19), Size = fromOffset(GUTTER - 3, 15), Parent = row }, { TextColor3 = 'TextMuted' })
+    local plus = New('TextButton', { BackgroundTransparency = 1, Text = '+', TextSize = 13, AnchorPoint = V2(1, 0), Position = UDim2new(1, 0, 0, 19), Size = fromOffset(GUTTER - 3, 15), Parent = row }, { TextColor3 = 'TextMuted' })
 
     local function Round(Value)
         if Slider.Rounding == 0 then return floor(Value) end
@@ -1971,12 +1971,12 @@ function GroupFuncs:AddDropdown(Idx, Info)
 
     local clip = self._clip
     local labelH = Info.Compact and 0 or 17
-    local row = self:_row(labelH + 25, Info.Text)
+    local row = self:_row(3 + labelH + 26, Info.Text)
     if not Info.Compact then
-        local lbl = New('TextLabel', { Position = fromOffset(GUTTER, 0), Size = UDim2new(1, -GUTTER, 0, 15), TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row }, { TextColor3 = 'Text' })
+        local lbl = New('TextLabel', { Position = fromOffset(GUTTER, 3), Size = UDim2new(1, -GUTTER, 0, 15), TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row }, { TextColor3 = 'Text' })
         setText(lbl, Info.Text)
     end
-    local box = New('TextButton', { Position = fromOffset(GUTTER, labelH), Size = UDim2new(1, -2 * GUTTER, 0, 20), Text = '', Parent = row }, { BackgroundColor3 = 'Element' })
+    local box = New('TextButton', { Position = fromOffset(GUTTER, 3 + labelH), Size = UDim2new(1, -2 * GUTTER, 0, 20), Text = '', Parent = row }, { BackgroundColor3 = 'Element' })
     local stroke = New('UIStroke', { Parent = box })
     local valueText = New('TextLabel', { Position = fromOffset(7, 0), Size = UDim2new(1, -28, 1, 0), TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = box })
     local plusIcon = New('TextLabel', { AnchorPoint = V2(0.5, 0.5), Position = UDim2new(1, -10, 0.5, 0), Size = fromOffset(12, 12), Text = '+', TextSize = 15, Parent = box }, { TextColor3 = 'TextDim' })
@@ -2385,18 +2385,21 @@ function Library:CreateWindow(...)
         local rng = Random.new(20261105)
         for _ = 1, 26 do
             local x, y = rng:NextNumber(0.03, 0.97), rng:NextNumber(0.03, 0.97)
-            if (x - 0.73) ^ 2 + (y - 0.71) ^ 2 > 0.12 then
+            if (x - 0.5) ^ 2 + (y - 0.5) ^ 2 > 0.12 then
                 local s = (rng:NextNumber() < 0.25) and 2 or 1
                 local f = New('Frame', { AnchorPoint = V2(0.5, 0.5), Position = fromScale(x, y), Size = fromOffset(s, s), Visible = Prefs.stars, Parent = MoonLayer }, { BackgroundColor3 = 'Star' })
                 Stars[#Stars + 1] = { f = f, phase = rng:NextNumber(0, math.pi * 2), speed = rng:NextNumber(0.5, 1.4) }
             end
         end
     end
-    local Moon = crescent(MoonLayer, 'Moon', 'Panel')
-    Moon.Size = fromScale(0.58, 0.58)
-    Moon.Position = fromScale(0.73, 0.71)
-    Moon.Visible = Prefs.moon
-    New('UIAspectRatioConstraint', { AspectRatio = 1, Parent = Moon })
+    local MoonBox = New('Frame', {
+        BackgroundTransparency = 1, AnchorPoint = V2(0.5, 0.5), Position = fromScale(0.5, 0.5), Size = fromScale(0.6, 0.6),
+        Visible = Prefs.moon, Parent = MoonLayer,
+    })
+    New('UIAspectRatioConstraint', { AspectRatio = 1, Parent = MoonBox })
+    local Moon = crescent(MoonBox, 'Moon', 'Panel')
+    Moon.Size = fromScale(1, 1)
+    Moon.Position = fromScale(0.5825, 0.4125)
     New('UIGradient', { Rotation = 35, Color = ColorSequence.new(Color3.new(1, 1, 1), rgb(130, 130, 140)), Parent = Moon })
     local PageHolder = New('Frame', { BackgroundTransparency = 1, Size = fromScale(1, 1), Parent = Panel })
 
@@ -2825,7 +2828,7 @@ function Library:CreateWindow(...)
     -- ---------------------------------------------------------------- open / close
     local MoonDrift = 0
     local function placeMoon()
-        Moon.Position = UDim2new(0.73, 0, 0.71, floor(MoonDrift + 0.5))
+        MoonBox.Position = UDim2new(0.5, 0, 0.5, floor(MoonDrift + 0.5))
     end
 
     local function setWinAlpha(a)
@@ -2875,7 +2878,7 @@ function Library:CreateWindow(...)
     end
 
     function Window._applyPrefs(key)
-        if key == 'moon' then Moon.Visible = Prefs.moon end
+        if key == 'moon' then MoonBox.Visible = Prefs.moon end
         if key == 'stars' then for _, s in ipairs(Stars) do s.f.Visible = Prefs.stars end end
         if key == 'scale' then applyScale() end
         if key == 'font' or key == 'lowercase' then relayoutTabs(true) end

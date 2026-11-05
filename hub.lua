@@ -7094,30 +7094,20 @@ if HUB_CURRENT ~= 'roguecopy' then
         -- client :Fire(...) is a plain remote:FireServer(...) (Internal/AeroClient).
         local Players     = game:GetService('Players')
         local LocalPlayer = Players.LocalPlayer
-        local HttpService = game:GetService('HttpService')
         local StatsSvc    = game:GetService('Stats')
         local PLACE_NAMES = { [115776365257536] = 'Plaza', [119587547774646] = 'Private Gym', [118669925076970] = 'Park' }
-        local resetCalib, exportCalib, importCalib -- forward-declared for the buttons
 
         local Tab = Window:AddTab('PracticalBB')
 
         -- ===== UI: Auto Perfect Release ===================================
         local MeterBox = Tab:AddLeftGroupbox('Auto Perfect Release')
-        MeterBox:AddLabel('The shot meter runs on the SERVER. It streams the\nfill to your character\'s meterOffset attribute and\nleaves the bar frozen exactly where it judged your\nrelease. After every shot this reads that frozen spot\nand the grade, learns where Perfect sits and how late\nyour release lands, and lets go so it lands in the\nmiddle of Perfect. A built-in memory covers the Vertical\nmeter, so there is nothing to set up. Other meters learn\ntheir own in a few shots. Press and hold your shoot key.', true)
         local MeterStatus = MeterBox:AddLabel('Idle', true)
-        local CalibLabel  = MeterBox:AddLabel('Calibration: none yet', true)
         MeterBox:AddToggle('PBAutoRelease', {
             Text = 'Auto perfect release', Default = false,
             Tooltip = 'Press and hold your shoot key; the release is sent for you at the perfect moment. If the fill cannot be tracked for a shot, that shot is left completely to you.',
         }):AddKeyPicker('PBAutoReleaseKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto perfect release' })
         MeterBox:AddToggle('PBHoldForMe', { Text = 'Ignore my early let-go', Default = true,
             Tooltip = 'Only while the fill is being tracked live: the game\'s own release (letting go of the shoot key, or a Jump key-up) is held back so it cannot beat the timed release. The moment the fill stops updating, the held release is sent - it can never stall a shot.' })
-        MeterBox:AddToggle('PBLearn', { Text = 'Learn from every shot', Default = true,
-            Tooltip = 'After every shot (auto OR by hand) the spot where the server froze the bar is saved with its grade: Perfects mark the window, Good / Early grades sit below it, Late grades above it. Auto releases also measure how long your release takes to land. Saved per meter type to a file, so it carries over between sessions.' })
-        MeterBox:AddSlider('PBPingComp', { Text = 'Ping compensation', Default = 100, Min = 0, Max = 200, Rounding = 0, Suffix = ' %',
-            Tooltip = 'Starting lead = this % of your round trip. After each shot the measured landing delay corrects it automatically, so leave it at 100% unless the log shows the delay is wildly off.' })
-        MeterBox:AddSlider('PBTrim', { Text = 'Manual trim', Default = 0, Min = -0.15, Max = 0.15, Rounding = 3,
-            Tooltip = 'Shift the aim by hand, in bar units. One server frame is about 0.05 on the Vertical meter. Negative = earlier. Added on top of the learned aim.' })
         MeterBox:AddToggle('PBFpsBoost', { Text = 'Max FPS while shooting', Default = true,
             Tooltip = 'A release can only leave once per frame: at 60 FPS that is every 16.7 ms, a whole server frame of meter. While your meter is up the FPS cap is raised to the value below, then put back. Needs setfpscap + getfpscap (Volt has both).' })
         MeterBox:AddSlider('PBFpsTarget', { Text = 'Shot FPS cap', Default = 240, Min = 120, Max = 600, Rounding = 0, Suffix = ' fps',
@@ -7130,14 +7120,7 @@ if HUB_CURRENT ~= 'roguecopy' then
         MeterBox:AddToggle('PBServerClock', { Text = 'Server clock sync', Default = true,
             Tooltip = 'Read-only. The game\'s own position stream arrives 60 times a second stamped with the server\'s send time. How late it is arriving right now (frame phase + network jitter), compared with usual, shifts the release, shot by shot.' })
         MeterBox:AddToggle('PBMeterLog', { Text = 'Log meter (console)', Default = false,
-            Tooltip = 'Print every shot: meter type, fill updates, where the release went out, where the server froze the bar, the landing delay, the grade and the next aim. Works with Auto off too.' })
-        MeterBox:AddButton({ Text = 'Reset calibration', Func = function() if resetCalib then resetCalib() end end })
-        MeterBox:AddButton({ Text = 'Copy calibration code', Func = function() if exportCalib then exportCalib() end end })
-        MeterBox:AddInput('PBCalibCode', { Text = 'Paste calibration code', Default = '', Finished = false, Placeholder = 'PBM1...',
-            Tooltip = 'Paste a code from "Copy calibration code" (yours or a friend\'s), then press Load. It replaces the meter memory on this hub.' })
-        MeterBox:AddButton({ Text = 'Load pasted code', Func = function()
-            if importCalib then importCalib(Options.PBCalibCode and Options.PBCalibCode.Value) end
-        end })
+            Tooltip = 'Print every shot: meter type, fill updates, where the release went out, where the server froze the bar, the landing delay, the grade and the aim. Works with Auto off too.' })
 
         -- ===== UI: Info ===================================================
         local InfoBox = Tab:AddRightGroupbox('PracticalBB')
@@ -7738,31 +7721,22 @@ if HUB_CURRENT ~= 'roguecopy' then
         --  * The fill is a straight line per shot (~3.05 bar/s logged): fitted over
         --    the recent updates and anchored on the least-delayed ones instead of
         --    extrapolating the newest update.
-        --  * A bar that stopped moving before the release landed (topped out) freezes
-        --    at its top whatever the timing, so that shot is learned at its projected
-        --    landing spot instead of the frozen one.
         local GRADES = { 'Very Early', 'Early', 'Slightly Early', 'Good', 'Perfect', 'Slightly Late', 'Late', 'Very Late' }
-        -- Meter with no data yet: Perfect comes about BASE_HOLD seconds after the bar's first
-        -- update on the base memory's meter (aim 1.47, start 0.242, 3.05 per second). Meter types
-        -- may draw the bar at another scale, so this uses each bar's measured speed. A guess for
-        -- the first shot only: after that the grades walk it in.
+        -- A meter with no shots below: Perfect comes about BASE_HOLD seconds after the bar's first
+        -- update on Vertical (aim 1.47, start 0.242, 3.05 per second). Meter types may draw the bar
+        -- at another scale, so this uses each bar's measured speed. It stays a guess: nothing
+        -- corrects it during play.
         local BASE_HOLD, BASE_SPEED = 0.4, 3.05
         local FRESH = 0.3        -- a fill update older than this = no longer tracking live
         local EDGE = 0.03        -- assumed Perfect width past the outermost Perfect when nothing bounds that side
-        local STEP_UP = 0.05     -- no Perfect yet: aim one server frame past the latest early (before the earliest late)
-        local MAX_SAMPLES = 40   -- shots remembered per meter type
         local FIT_N = 15         -- recent fill updates in the line fit
         local SPIN_MAX = 0.02    -- longest in-frame wait for the exact moment
         local STALL = 0.042      -- no fill update for this long (2.5 server frames) = the bar stopped moving
-        local CALIB_DIR, CALIB_FILE = 'GameHub_practicalbb', 'GameHub_practicalbb/meter_calibration.json'
-        -- The base memory everyone starts from (Vertical meter, last 40 of 504 shots, 36 of those
-        -- 40 Perfect, saved 2026-11-04): where the server froze each shot + its grade, and the
-        -- measured landing correction. Spots are server positions, so they carry over to other
-        -- players; the correction depends on the connection and re-learns within a few shots.
-        -- New base: paste the spots and adj from meter_calibration.json and raise CALIB_V, which
-        -- moves everyone onto it once.
-        local CALIB_V = 4
-        local SEED = {
+        -- The shots the aim comes from, and nothing else (Vertical meter, last 40 of 504 shots, 36
+        -- of those 40 Perfect, saved 2026-11-04): where the server froze each shot + its grade, and
+        -- the measured landing correction. Nothing is learned during play and nothing is saved or
+        -- read from disk. New shots go here by hand: Log meter prints each one's spot and grade.
+        local BASE_MEMORY = {
             adj = -0.039,
             types = { Vertical = {
                 { 1.456, 5 }, { 1.46, 5 }, { 1.412, 4 }, { 1.459, 5 }, { 1.466, 5 }, { 1.458, 5 }, { 1.458, 5 }, { 1.477, 5 },
@@ -7785,8 +7759,6 @@ if HUB_CURRENT ~= 'roguecopy' then
         local function f3(x) return type(x) == 'number' and ('%.3f'):format(x) or tostring(x) end
         local function ms(x) return type(x) == 'number' and tostring(math.floor(x * 1000 + 0.5)) or '?' end
         local function vecStr(v) return typeof(v) == 'Vector2' and ('(%.3f, %.3f)'):format(v.X, v.Y) or tostring(v) end
-        local function trimNow() return (Options.PBTrim and Options.PBTrim.Value) or 0 end
-        local function pingComp() return ((Options.PBPingComp and Options.PBPingComp.Value) or 100) / 100 end
         local function rtt() -- round trip, seconds
             local ok, v = pcall(function() return StatsSvc.Network.ServerStatsItem['Data Ping']:GetValue() end)
             if ok and type(v) == 'number' and v > 0 then return v / 1000 end
@@ -7850,238 +7822,35 @@ if HUB_CURRENT ~= 'roguecopy' then
             if not (d and srvRef) then return 0, d end
             return math.clamp(d - srvRef, -0.025, 0.025), d
         end
-        local recent = {} -- grades of the last timed auto releases (this session)
-        local lastPrec    -- one line about the last timed release, for the calibration label
         local dtAvg = 1 / 60
 
-        -- ---- calibration: per meter type, the frozen spots + grades ---------
-        local function freshCalib()
-            local c = { v = CALIB_V, adj = SEED.adj, types = {} }
-            for k, list in pairs(SEED.types) do
-                local copy = {}
-                for i, smp in ipairs(list) do copy[i] = { smp[1], smp[2] } end
-                c.types[k] = { s = copy, shots = 0, perfects = 0 }
-            end
-            return c
-        end
-        local calib = freshCalib()
-        -- Saved with the executor's file functions. Executors differ: some lack
-        -- isfile / isfolder / makefolder, or cannot write into a sub-folder, so
-        -- every step is tried on its own and a flat file in the workspace root is
-        -- the fallback. storeNote tells the player when nothing can be saved.
-        local CALIB_FLAT = 'GameHub_practicalbb_meter_calibration.json'
-        local storeNote = (not writefile) and 'Not saved: your executor has no writefile' or nil
-        -- Merge a decoded calibration table into calib; true if it was usable.
-        local function applyCalib(t)
-            if type(t) ~= 'table' or type(t.v) ~= 'number' or t.v < 3 or type(t.types) ~= 'table' then return false end -- older format: keep the base
-            -- Saved before this base: the base replaces the meters it covers. Meters it has
-            -- nothing for keep what they learned, and so does the correction, measured on
-            -- this player's own connection.
-            local beforeBase = t.v < CALIB_V
-            calib.adj = math.clamp(tonumber(t.adj) or calib.adj, -0.15, 0.15)
-            for k, e in pairs(t.types) do
-                if type(k) == 'string' and type(e) == 'table' and type(e.s) == 'table' and not (beforeBase and SEED.types[k]) then
-                    local list = {}
-                    for _, smp in ipairs(e.s) do
-                        local f, g = type(smp) == 'table' and tonumber(smp[1]), type(smp) == 'table' and tonumber(smp[2])
-                        if f and g and g >= 1 and g <= 8 then list[#list + 1] = { f, g } end
-                    end
-                    while #list > MAX_SAMPLES do table.remove(list, 1) end
-                    calib.types[k] = { s = list, shots = tonumber(e.shots) or 0, perfects = tonumber(e.perfects) or 0 }
-                end
-            end
-            return true
-        end
-        local function readCalibFile(path)
-            if not readfile then return nil end
-            if isfile then
-                local okE, exists = pcall(isfile, path)
-                if okE and not exists then return nil end
-            end
-            local ok, raw = pcall(readfile, path)
-            if not ok or type(raw) ~= 'string' or raw == '' then return nil end
-            local okJ, t = pcall(function() return HttpService:JSONDecode(raw) end)
-            return okJ and t or nil
-        end
-        if not applyCalib(readCalibFile(CALIB_FILE)) then applyCalib(readCalibFile(CALIB_FLAT)) end
-        local function saveCalib()
-            if not writefile then
-                storeNote = 'Not saved: your executor has no writefile'
-                return
-            end
-            local okJ, data = pcall(function() return HttpService:JSONEncode(calib) end)
-            if not okJ then return end
-            if makefolder then
-                local hasFolder = false
-                if isfolder then
-                    local okF, r = pcall(isfolder, CALIB_DIR)
-                    hasFolder = okF and r
-                end
-                if not hasFolder then pcall(makefolder, CALIB_DIR) end
-            end
-            if pcall(writefile, CALIB_FILE, data) then
-                storeNote = nil
-            elseif pcall(writefile, CALIB_FLAT, data) then
-                storeNote = nil
-            else
-                storeNote = 'Not saved: your executor refused to write the file'
-            end
-        end
-        local function typeKey(mtype) return (type(mtype) == 'string' and mtype ~= '') and mtype or 'Unknown' end
-        local function entryFor(mtype)
-            local k = typeKey(mtype)
-            local e = calib.types[k]
-            if not e then e = { s = {}, shots = 0, perfects = 0 }; calib.types[k] = e end
-            return e
-        end
-        -- Where Perfect sits, from the remembered frozen spots: aim, lo, hi, how.
-        --  * Perfects seen: the window runs from halfway between the highest early
-        --    stop below them and the lowest Perfect, to halfway between the highest
-        --    Perfect and the lowest late stop above it (EDGE past it when unbounded).
-        --  * no Perfect yet: halfway between early and late, else one frame past
-        --    the latest early (or before the earliest late) - walks in shot by shot.
-        local function estimate(list)
-            local P, E, L = {}, {}, {}
+        -- ---- the aim: where Perfect sits in those shots, fixed for the session --
+        -- From halfway between the highest early stop below the Perfects and the lowest Perfect,
+        -- to halfway between the highest Perfect and the lowest late stop above it (EDGE past it
+        -- when there is none). The aim is the middle.
+        local function perfectMiddle(list)
+            local pLo, pHi = math.huge, -math.huge
             for _, smp in ipairs(list) do
-                local f, g = smp[1], smp[2]
-                if g == 5 then P[#P + 1] = f elseif g < 5 then E[#E + 1] = f else L[#L + 1] = f end
-            end
-            if #P > 0 then
-                local pLo, pHi = math.huge, -math.huge
-                for _, f in ipairs(P) do pLo, pHi = math.min(pLo, f), math.max(pHi, f) end
-                local eMax, lMin
-                for _, f in ipairs(E) do if f < pLo and (not eMax or f > eMax) then eMax = f end end
-                for _, f in ipairs(L) do if f > pHi and (not lMin or f < lMin) then lMin = f end end
-                local lo = eMax and (eMax + pLo) / 2 or (pLo - EDGE)
-                local hi = lMin and (lMin + pHi) / 2 or (pHi + EDGE)
-                return (lo + hi) / 2, lo, hi, ('%d perfect stop%s'):format(#P, #P == 1 and '' or 's')
+                if smp[2] == 5 then pLo, pHi = math.min(pLo, smp[1]), math.max(pHi, smp[1]) end
             end
             local eMax, lMin
-            for _, f in ipairs(E) do if not eMax or f > eMax then eMax = f end end
-            for _, f in ipairs(L) do if not lMin or f < lMin then lMin = f end end
-            if eMax and lMin then return (eMax + lMin) / 2, eMax, lMin, 'between early and late stops' end
-            if eMax then return eMax + STEP_UP, eMax, nil, 'one frame past the latest early stop' end
-            if lMin then return lMin - STEP_UP, nil, lMin, 'one frame before the earliest late stop' end
-            return nil
+            for _, smp in ipairs(list) do
+                local f, g = smp[1], smp[2]
+                if g < 5 and f < pLo and (not eMax or f > eMax) then eMax = f end
+                if g > 5 and f > pHi and (not lMin or f < lMin) then lMin = f end
+            end
+            local lo = eMax and (eMax + pLo) / 2 or (pLo - EDGE)
+            local hi = lMin and (lMin + pHi) / 2 or (pHi + EDGE)
+            return (lo + hi) / 2
         end
-        -- The lead: one round trip x ping comp, corrected by the measured landing delay.
-        local function leadFor(r) return math.clamp(r * pingComp() + calib.adj, 0, 0.5) end
+        local AIM = {}
+        for meter, list in pairs(BASE_MEMORY.types) do AIM[meter] = perfectMiddle(list) end
+        -- The lead: one round trip, measured live, plus the landing correction from those shots.
+        local function leadFor(r) return math.clamp(r + BASE_MEMORY.adj, 0, 0.5) end
         -- Aim for a shot in absolute bar units (nil until the bar's direction is known).
         local function aimFor(s, speed)
             if not s.base then return nil end
-            local a, lo, hi, how = estimate(entryFor(s.mtype).s)
-            if not a then a, how = s.base + (speed or BASE_SPEED) * BASE_HOLD, 'default (no shots learned yet)' end
-            return a + trimNow(), lo, hi, how
-        end
-        local shownType = 'Vertical'
-        local function showCalib(mtype)
-            if mtype then shownType = typeKey(mtype) end
-            local e = calib.types[shownType]
-            local a, lo, hi
-            if e then a, lo, hi = estimate(e.s) end
-            local r = rtt()
-            local res = ''
-            if #recent > 0 then
-                local p, early, late = 0, 0, 0
-                for _, g in ipairs(recent) do
-                    if g == 5 then p = p + 1 elseif g < 5 then early = early + 1 else late = late + 1 end
-                end
-                res = ('\nLast %d timed releases: %d Perfect, %d early, %d late'):format(#recent, p, early, late)
-            end
-            setText(CalibLabel, ('%s meter: aim %s%s\nLead %s ms (ping %s ms, measured correction %+d ms)\n%d shots learned (%d perfect), %d spots in memory%s%s%s'):format(
-                shownType, a and f3(a + trimNow()) or 'none yet',
-                (lo and hi) and (' (Perfect ~%s - %s)'):format(f3(lo), f3(hi)) or '',
-                ms(leadFor(r)), ms(r), math.floor(calib.adj * 1000 + 0.5),
-                e and e.shots or 0, e and e.perfects or 0, e and #e.s or 0, res,
-                lastPrec and ('\n' .. lastPrec) or '', storeNote and ('\n' .. storeNote) or ''))
-        end
-        showCalib()
-        resetCalib = function()
-            calib = freshCalib()
-            table.clear(recent); srvRef, lastPrec = nil, nil
-            saveCalib(); showCalib()
-            Library:Notify('Meter calibration reset to the built-in memory', 3)
-        end
-        -- Share a calibration as a short code: PBM1.<adj ms>.<Type>-<shots>-<perfects>-<spots>
-        -- with every remembered spot packed into 4 base-36 characters
-        -- ((frozen spot + 10) in thousandths x 10 + grade). ~170 chars for 40 spots.
-        local B36 = '0123456789abcdefghijklmnopqrstuvwxyz'
-        local function b36(n, width)
-            local s = ''
-            for _ = 1, width do
-                local d = n % 36
-                s = B36:sub(d + 1, d + 1) .. s
-                n = math.floor(n / 36)
-            end
-            return s
-        end
-        local function unb36(s)
-            local n = 0
-            for i = 1, #s do
-                local d = B36:find(s:sub(i, i), 1, true)
-                if not d then return nil end
-                n = n * 36 + d - 1
-            end
-            return n
-        end
-        local function calibCode()
-            local parts = { 'PBM1', tostring(math.floor(calib.adj * 1000 + 0.5)) }
-            for k, e in pairs(calib.types) do
-                if #e.s > 0 and k:match('^%w+$') then
-                    local buf = {}
-                    for _, smp in ipairs(e.s) do
-                        local f = math.clamp(math.floor((smp[1] + 10) * 1000 + 0.5), 0, 160000)
-                        buf[#buf + 1] = b36(f * 10 + math.clamp(smp[2], 1, 8), 4)
-                    end
-                    parts[#parts + 1] = ('%s-%d-%d-%s'):format(k, e.shots or 0, e.perfects or 0, table.concat(buf))
-                end
-            end
-            return table.concat(parts, '.')
-        end
-        local function parseCalibCode(code)
-            local parts = string.split(code, '.')
-            if parts[1] ~= 'PBM1' or not tonumber(parts[2]) then return nil end
-            local t = { v = CALIB_V, adj = tonumber(parts[2]) / 1000, types = {} }
-            for i = 3, #parts do
-                local k, shots, perf, data = parts[i]:match('^(%w+)%-(%d+)%-(%d+)%-(%w+)$')
-                if not k or #data % 4 ~= 0 then return nil end
-                local s = {}
-                for j = 1, #data, 4 do
-                    local n = unb36(data:sub(j, j + 3))
-                    if not n then return nil end
-                    local g = n % 10
-                    s[#s + 1] = { math.floor((n - g) / 10 + 0.5) / 1000 - 10, g }
-                end
-                t.types[k] = { s = s, shots = tonumber(shots), perfects = tonumber(perf) }
-            end
-            return t
-        end
-        exportCalib = function()
-            local code = calibCode()
-            print('[PB meter] calibration code: ' .. code)
-            if setclipboard and pcall(setclipboard, code) then
-                Library:Notify(('Calibration code copied (%d characters) - send it to your friend'):format(#code), 5)
-            else
-                Library:Notify('No setclipboard on this executor - the code is printed in the console (F9)', 6)
-            end
-        end
-        importCalib = function(text)
-            text = tostring(text or ''):gsub('%s', '')
-            if text == '' then Library:Notify('Paste a calibration code first', 3); return end
-            local t = parseCalibCode(text)
-            if not t then -- also accept the raw JSON of a saved calibration file
-                local ok, j = pcall(function() return HttpService:JSONDecode(text) end)
-                t = ok and j or nil
-            end
-            if type(t) ~= 'table' or type(t.v) ~= 'number' or t.v < 3 then
-                Library:Notify('That is not a calibration code (copy one with "Copy calibration code")', 4)
-                return
-            end
-            t.v = CALIB_V -- picked by hand, so it replaces the base too
-            calib = freshCalib()
-            applyCalib(t)
-            saveCalib(); showCalib()
-            Library:Notify(storeNote and ('Calibration loaded for this session only. ' .. storeNote) or 'Calibration loaded and saved', 5)
+            return AIM[s.mtype] or (s.base + (speed or BASE_SPEED) * BASE_HOLD)
         end
 
         -- My fighter = workspace.Characters[<my name>] (Components/Character.lua).
@@ -8205,25 +7974,17 @@ if HUB_CURRENT ~= 'roguecopy' then
             return r ~= nil and (pcall(function() r:FireServer({ Shoot = false }) end))
         end
         -- p / v relative to the shot start. why: nil = timed release, 'peak' = the
-        -- bar topped out first; both teach the landing delay. Fail-safes
-        -- ('timeout', 'your release ...') do not.
+        -- bar topped out first, otherwise a fail-safe ('timeout', 'your release ...').
         local function release(s, p, v, lead, aim, why, r, corr, d, spin)
             local now = os.clock()
             s.released, s.releasedAt = true, now
             s.relP, s.relV, s.lead, s.aim, s.why, s.relRtt = p, v, lead, aim, why, r
-            s.corr, s.dNow, s.stall = corr, d, staleAt(s, now)
+            s.dNow, s.stall = d, staleAt(s, now)
             swallowedAt = nil
             local ok = fireRelease()
             local land = (s.base and p) and (p + s.base + (v or 0) * (lead or 0)) or nil
             local fps = math.floor(1 / math.max(dtAvg, 1e-3) + 0.5)
-            if why == nil then
-                s.virt = land
-                lastPrec = ('Last timed release: %d fps, waited %s ms in-frame, clock %s'):format(fps, ms(spin or 0),
-                    d and ('%+d ms'):format(math.floor((corr or 0) * 1000 + 0.5)) or 'no stream')
-            end
-            setStatus(ok and ('Released at %s - should land %s (aim %s, lead %s ms%s)'):format(
-                    f3(s.base and p and p + s.base or p), f3(land), f3(aim), ms(lead), why and (', ' .. why) or '')
-                or 'Release failed: Shoot remote not found')
+            setStatus(ok and 'Released' or 'Release failed: Shoot remote not found')
             log(('auto release at %s (abs), speed %s/s, lead %s ms (ping %s, clock corr %s ms, downlink %s ms) -> should land %s, aim %s (%s) | %d fps, in-frame wait %s ms%s | %s'):format(
                 f3(s.base and p and p + s.base or p), f3(v), ms(lead), ms(r), corr and ms(corr) or '-', d and ms(d) or '-',
                 f3(land), f3(aim), tostring(why or 'timed'), fps, ms(spin or 0), s.stall and ', bar had stopped moving' or '', traceStr(s, now)))
@@ -8248,7 +8009,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                                     swallowedAt = swallowedAt or now
                                     return -- held: the timed release replaces it
                                 end
-                                if s and not s.released and not s.userRelAt then s.userRelAt = now end -- your own release (log / learning)
+                                if s and not s.released and not s.userRelAt then s.userRelAt = now end -- your own release (for the log)
                             end
                         end
                         if nmOld then return nmOld(self, ...) end
@@ -8285,7 +8046,7 @@ if HUB_CURRENT ~= 'roguecopy' then
             -- No fill updates for our shot: it cannot be timed - leave it to the player.
             if not s.blind and n == 0 and now - s.t0 > 0.5 then
                 s.blind = true
-                if autoOn() then setStatus('No fill updates for this shot - it is yours to time (see log)') end
+                if autoOn() then setStatus('Could not track this shot, it is yours to time') end
                 log(('meter shown (type %s) but no meterOffset updates arrived in 0.5s - this shot is not auto-timed'):format(tostring(s.mtype)))
                 return
             end
@@ -8323,51 +8084,22 @@ if HUB_CURRENT ~= 'roguecopy' then
             end
         end))
 
-        -- After the grade: read the frozen bar, remember (spot, grade), measure the landing delay.
-        local function learnFrom(s, F, g, name, contest)
-            local how, R, v, r, virt, stall
+        -- After the grade: read the frozen bar and report the shot. Nothing from it reaches the aim
+        -- or the lead. The stream delay kept here is only Server clock sync's idea of "usual", for
+        -- this session.
+        local function reportShot(s, F, name, contest)
+            local how, R, v, r
             if s.releasedAt then
                 how, R, v, r = 'auto', (s.relP and s.base) and (s.relP + s.base) or nil, s.relV, s.relRtt
-                virt, stall = s.virt, s.stall
             elseif s.userRelAt then
                 local p, vv = fillAt(s, s.userRelAt)
                 how, R, v, r = 'your', (p and s.base) and (p + s.base) or nil, vv, rtt()
-                if R and vv then virt = R + vv * leadFor(r) end
-                stall = staleAt(s, s.userRelAt)
             end
             local lag = (F and R and v and v > 0.5) and (F - R) / v or nil
-            -- A bar that had stopped moving before the release landed and froze at its
-            -- own peak (topped out, not just a late update) froze there whatever the
-            -- timing, so that shot is learned at its projected landing.
-            local topped = stall and F and s.base and F <= s.peak + s.base + 0.01
-            local X = (topped and virt and virt > F) and virt or F
-            local e = entryFor(s.mtype)
-            if how == 'auto' and s.why == nil and g then
-                recent[#recent + 1] = g
-                while #recent > 12 do table.remove(recent, 1) end
-            end
             if s.dNow then srvRef = srvRef and (srvRef + 0.2 * (s.dNow - srvRef)) or s.dNow end
-            if Toggles.PBLearn and Toggles.PBLearn.Value and X and g and g >= 1 and g <= 8 then
-                e.s[#e.s + 1] = { math.floor(X * 1000 + 0.5) / 1000, g }
-                while #e.s > MAX_SAMPLES do table.remove(e.s, 1) end
-                e.shots = e.shots + 1
-                if g == 5 then e.perfects = e.perfects + 1 end
-                -- landing delay: from a timed / peak auto release or your own release,
-                -- only while the bar was still moving (a topped-out bar tells nothing)
-                if lag and r and not topped and lag > -0.05 and lag < 0.5 and (how == 'your' or s.why == nil or s.why == 'peak') then
-                    local corr = lag - r * pingComp() - (s.corr or 0)
-                    calib.adj = math.clamp(calib.adj + 0.35 * (corr - calib.adj), -0.15, 0.15)
-                end
-                saveCalib()
-            end
-            showCalib(s.mtype)
-            local nextAim, lo, hi, why = estimate(e.s)
-            if nextAim then nextAim = nextAim + trimNow() end
-            setStatus(('%s - server stopped the bar at %s%s | next aim %s'):format(name, f3(F),
-                s.aim and (' (aim was ' .. f3(s.aim) .. ')') or '', f3(nextAim)))
-            log(('grade %s | %s release at %s, server froze the bar at %s%s, landed %s ms later (ping %s) | next aim %s, Perfect ~%s-%s (%s) | contest %s%%, green %s | %s'):format(
-                name, tostring(how or 'no'), f3(R), f3(F), (X ~= F) and (' (topped out - learned at ' .. f3(X) .. ')') or '',
-                ms(lag), ms(r), f3(nextAim), f3(lo), f3(hi), tostring(why),
+            setStatus('Last shot: ' .. name)
+            log(('grade %s | %s release at %s, server froze the bar at %s, landed %s ms later (ping %s) | aim was %s | contest %s%%, green %s | %s'):format(
+                name, tostring(how or 'no'), f3(R), f3(F), ms(lag), ms(r), f3(s.aim),
                 tostring(contest), f3(s.gw), traceStr(s, s.releasedAt or s.userRelAt or os.clock())))
         end
 
@@ -8393,10 +8125,9 @@ if HUB_CURRENT ~= 'roguecopy' then
                 if show then
                     local s = beginShot(char, mtype)
                     if autoOn() then raiseFps() end
-                    if typeKey(mtype) ~= shownType then showCalib(mtype) end
-                    local a = estimate(entryFor(mtype).s)
+                    local a = AIM[mtype]
                     log(('meter shown: type %s, last frozen spot %s, green window %s, aim %s'):format(tostring(mtype),
-                        vecStr(char:GetAttribute('meterOffset')), f3(s.gw), a and f3(a + trimNow()) or 'default'))
+                        vecStr(char:GetAttribute('meterOffset')), f3(s.gw), a and f3(a) or 'timed guess'))
                     if mtype == 'None' and autoOn() then
                         setStatus('Meter type is "None" - pick any meter in Settings if releases never fire')
                     end
@@ -8436,8 +8167,8 @@ if HUB_CURRENT ~= 'roguecopy' then
                 task.delay(0.25, function()
                     local raw = asVec(char:GetAttribute('meterOffset'))
                     local F = (raw and s.u) and raw:Dot(s.u) or nil
-                    local ok, err = pcall(learnFrom, s, F, g, name, contest)
-                    if not ok then log('learn error: ' .. tostring(err)) end
+                    local ok, err = pcall(reportShot, s, F, name, contest)
+                    if not ok then log('report error: ' .. tostring(err)) end
                 end)
             end)) end
             -- server clock: the game's own position stream (read-only listener)

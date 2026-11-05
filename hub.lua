@@ -7422,17 +7422,15 @@ if HUB_CURRENT ~= 'roguecopy' then
             --    after a nearby opponent's meter starts, minus your lead and round trip.
             ;(function()
                 local DefBox = Tabs.Players:AddLeftGroupbox('Auto Guard')
-                DefBox:AddLabel('Steers you while you hold G next to the ball handler (the game\'s own guard movement does the moving).', true)
+                DefBox:AddLabel('Hold G next to the ball handler and it guards for you.', true)
                 local GuardStatus = DefBox:AddLabel('Idle', true)
                 DefBox:AddToggle('PBAutoGuard', { Text = 'Auto guard (hold G)', Default = false,
-                    Tooltip = 'Hold G next to the ball handler: you copy their movement and stay between them and the hoop they attack. Turn it on, then just hold G.' })
+                    Tooltip = 'Hold G next to the ball handler: you follow their movement and stay between them and the hoop they attack (the game\'s own guard movement does the moving).' })
                     :AddKeyPicker('PBAutoGuardKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto guard' })
-                DefBox:AddSlider('PBGuardStrength', { Text = 'Guard control', Default = 100, Min = 30, Max = 100, Rounding = 0, Suffix = ' %',
-                    Tooltip = '100% = fully automatic. Lower lets your own WASD pull against it.' })
+                DefBox:AddSlider('PBGuardHuman', { Text = 'Humanization', Default = 50, Min = 0, Max = 100, Rounding = 0, Suffix = ' %',
+                    Tooltip = 'Higher looks more like a person: you react a little later, the stick eases instead of snapping, you drift a bit off the perfect spot and your own WASD gets through more. 0 = perfect (robotic) mirroring.' })
                 DefBox:AddSlider('PBGuardGap', { Text = 'Stay in front by', Default = 3.25, Min = 2, Max = 6, Rounding = 2, Suffix = ' studs',
                     Tooltip = 'How far in front of the handler (toward the hoop they attack) you hold. 3.25 is what the game\'s own mobile guard assist uses.' })
-                DefBox:AddSlider('PBGuardRead', { Text = 'Read ahead', Default = 0.12, Min = 0, Max = 0.3, Rounding = 2, Suffix = ' s',
-                    Tooltip = 'You see other players slightly in the past, so aim where the handler will be this far ahead. Raise it if quick moves still get by, lower it if you overshoot.' })
                 local BlockBox = Tabs.Players:AddRightGroupbox('Auto Block')
                 BlockBox:AddLabel('Jumps for you when an opponent near you shoots, timed to their release.', true)
                 local BlockStatus = BlockBox:AddLabel('Idle', true)
@@ -7500,10 +7498,28 @@ if HUB_CURRENT ~= 'roguecopy' then
                 end
 
                 -- ---- auto guard --------------------------------------------------
-                local GUARD_KP = 3     -- 1/s: how hard the gap to the guard spot is closed
-                local GUARD_VMAX = 15  -- studs/s that counts as a full stick
-                local track = setmetatable({}, { __mode = 'k' }) -- [handler root] = { p, t, v }
-                local guardInfo = {}   -- written on the game thread (plain values only)
+                local GUARD_KP = 3       -- 1/s: how hard the gap to the guard spot is closed
+                local GUARD_VMAX = 15    -- studs/s that counts as a full stick
+                local GUARD_READ = 0.12  -- you see other players about this far in the past
+                local track = setmetatable({}, { __mode = 'k' }) -- [handler root] = { hist = { {t, p} } }
+                local guardInfo = {}     -- written on the game thread (plain values only)
+                -- Humanization h (0..1): reaction delay 0.04 + 0.22h s, stick easing 0.02 + 0.13h s,
+                -- a slow drift of up to 1.1h studs off the spot, a dead zone of 0.25 + 0.6h studs
+                -- while the handler stands still, and (1 - 0.35h) auto against your own WASD.
+                local human = { out = nil, t = nil, s1 = math.random() * 6.28, s2 = math.random() * 6.28, s3 = math.random() * 6.28 }
+                local function posAt(hist, t)
+                    local n = #hist
+                    if n == 0 then return nil end
+                    if t >= hist[n].t then return hist[n].p end
+                    for i = n, 2, -1 do
+                        local a, b = hist[i - 1], hist[i]
+                        if a.t <= t then
+                            local k = (b.t > a.t) and (t - a.t) / (b.t - a.t) or 1
+                            return a.p:Lerp(b.p, k)
+                        end
+                    end
+                    return hist[1].p
+                end
                 local function steer(M, raw)
                     guardInfo.name = nil
                     local st = rawget(M, 'State')
@@ -7517,31 +7533,47 @@ if HUB_CURRENT ~= 'roguecopy' then
                     local gp = h and goalPos(h.attributes)
                     local root = rawget(M, 'Root')
                     if not (typeof(hr) == 'Instance' and gp and typeof(root) == 'Instance') then return raw end
-                    -- the handler's velocity, smoothed over ~0.08 s
+                    local hu = math.clamp(((Options.PBGuardHuman and Options.PBGuardHuman.Value) or 50) / 100, 0, 1)
+                    -- the handler's recent path (about 0.6 s)
                     local now, hp = os.clock(), flat(hr.Position)
                     local tr = track[hr]
-                    if not tr or now - tr.t > 0.3 then
-                        tr = { p = hp, t = now, v = Vector3.zero }
+                    if not tr or now - tr.hist[#tr.hist].t > 0.3 then
+                        tr = { hist = {} }
                         track[hr] = tr
-                    elseif now > tr.t then
-                        local inst = (hp - tr.p) / (now - tr.t)
-                        if inst.Magnitude > 30 then inst = inst.Unit * 30 end
-                        tr.v = tr.v:Lerp(inst, math.clamp((now - tr.t) / 0.08, 0, 1))
-                        tr.p, tr.t = hp, now
                     end
-                    -- the spot in front of where they will be, toward the hoop they attack
-                    local ahead = hp + tr.v * Options.PBGuardRead.Value
+                    local hist = tr.hist
+                    if #hist == 0 or now > hist[#hist].t then hist[#hist + 1] = { t = now, p = hp } end
+                    while #hist > 2 and now - hist[1].t > 0.6 do table.remove(hist, 1) end
+                    -- where they were a reaction time ago, and how fast they were going then
+                    local delay = 0.04 + 0.22 * hu
+                    local pD = posAt(hist, now - delay) or hp
+                    local vD = (pD - (posAt(hist, now - delay - 0.08) or pD)) / 0.08
+                    if vD.Magnitude > 30 then vD = vD.Unit * 30 end
+                    -- the spot in front of them, toward the hoop they attack, plus a slow drift
+                    local ahead = pD + vD * GUARD_READ
                     local toGoal = flat(gp) - ahead
                     if toGoal.Magnitude < 0.5 then return raw end
-                    local spot = ahead + toGoal.Unit * Options.PBGuardGap.Value
+                    local drift = Vector3.new(math.sin(now * 0.9 + human.s1) * 0.6 + math.sin(now * 0.37 + human.s2) * 0.4, 0,
+                        math.sin(now * 0.7 + human.s2) * 0.6 + math.sin(now * 0.29 + human.s3) * 0.4) * (1.1 * hu)
+                    local spot = ahead + toGoal.Unit * Options.PBGuardGap.Value + drift
                     local err = spot - flat(root.Position)
-                    -- copy their velocity, plus close the gap to the spot
-                    local want = tr.v + err * GUARD_KP
-                    local auto = Vector3.zero
-                    if want.Magnitude > 0.6 then auto = want.Unit * math.min(want.Magnitude / GUARD_VMAX, 1) end
+                    -- follow their velocity, plus close the gap to the spot; stand still
+                    -- instead of making tiny corrections while they stand still
+                    local want = vD + err * GUARD_KP
+                    local target = Vector3.zero
+                    if not (vD.Magnitude < 2 and err.Magnitude < 0.25 + 0.6 * hu) and want.Magnitude > 0.6 then
+                        local cap = 1 - 0.1 * hu * (0.5 + 0.5 * math.sin(now * 1.3 + human.s3))
+                        target = want.Unit * math.min(want.Magnitude / GUARD_VMAX, cap)
+                    end
+                    -- the stick eases toward that instead of snapping
+                    local tau = 0.02 + 0.13 * hu
+                    local prev, dt = human.out, human.t and (now - human.t) or 1
+                    human.t = now
+                    local auto = (prev and dt < 0.25) and prev:Lerp(target, 1 - math.exp(-dt / tau)) or target
+                    human.out = auto
                     guardInfo.name, guardInfo.err = (h.model and h.model.Name) or '?', err.Magnitude
                     if raw.Magnitude < 0.05 then return auto end
-                    local w = Options.PBGuardStrength.Value / 100
+                    local w = 1 - 0.35 * hu
                     return raw * (1 - w) + auto * w
                 end
                 local guardM, guardFn

@@ -7103,7 +7103,7 @@ if HUB_CURRENT ~= 'roguecopy' then
 
         -- ===== UI: Auto Perfect Release ===================================
         local MeterBox = Tab:AddLeftGroupbox('Auto Perfect Release')
-        MeterBox:AddLabel('The shot meter runs on the SERVER. It streams the\nfill to your character\'s meterOffset attribute and\nleaves the bar frozen exactly where it judged your\nrelease. After every shot this reads that frozen spot\nand the grade, learns where Perfect sits and how late\nyour release lands, and lets go so it lands in the\nmiddle of Perfect. Press and hold your shoot key.', true)
+        MeterBox:AddLabel('The shot meter runs on the SERVER. It streams the\nfill to your character\'s meterOffset attribute and\nleaves the bar frozen exactly where it judged your\nrelease. After every shot this reads that frozen spot\nand the grade, learns where Perfect sits and how late\nyour release lands, and lets go so it lands in the\nmiddle of Perfect. A built-in memory covers the Vertical\nmeter, so there is nothing to set up. Other meters learn\ntheir own in a few shots. Press and hold your shoot key.', true)
         local MeterStatus = MeterBox:AddLabel('Idle', true)
         local CalibLabel  = MeterBox:AddLabel('Calibration: none yet', true)
         MeterBox:AddToggle('PBAutoRelease', {
@@ -7742,7 +7742,11 @@ if HUB_CURRENT ~= 'roguecopy' then
         --    at its top whatever the timing, so that shot is learned at its projected
         --    landing spot instead of the frozen one.
         local GRADES = { 'Very Early', 'Early', 'Slightly Early', 'Good', 'Perfect', 'Slightly Late', 'Late', 'Very Late' }
-        local BASE_TARGET = 0.98 -- meter with no data yet: aim this far past the start, the grades walk it in
+        -- Meter with no data yet: Perfect comes about BASE_HOLD seconds after the bar's first
+        -- update on the base memory's meter (aim 1.47, start 0.242, 3.05 per second). Meter types
+        -- may draw the bar at another scale, so this uses each bar's measured speed. A guess for
+        -- the first shot only: after that the grades walk it in.
+        local BASE_HOLD, BASE_SPEED = 0.4, 3.05
         local FRESH = 0.3        -- a fill update older than this = no longer tracking live
         local EDGE = 0.03        -- assumed Perfect width past the outermost Perfect when nothing bounds that side
         local STEP_UP = 0.05     -- no Perfect yet: aim one server frame past the latest early (before the earliest late)
@@ -7751,11 +7755,22 @@ if HUB_CURRENT ~= 'roguecopy' then
         local SPIN_MAX = 0.02    -- longest in-frame wait for the exact moment
         local STALL = 0.042      -- no fill update for this long (2.5 server frames) = the bar stopped moving
         local CALIB_DIR, CALIB_FILE = 'GameHub_practicalbb', 'GameHub_practicalbb/meter_calibration.json'
-        -- Starting point from your logged session (Vertical meter): where the server
-        -- froze each shot + its grade, and the measured landing correction.
+        -- The base memory everyone starts from (Vertical meter, last 40 of 504 shots, 36 of those
+        -- 40 Perfect, saved 2026-11-04): where the server froze each shot + its grade, and the
+        -- measured landing correction. Spots are server positions, so they carry over to other
+        -- players; the correction depends on the connection and re-learns within a few shots.
+        -- New base: paste the spots and adj from meter_calibration.json and raise CALIB_V, which
+        -- moves everyone onto it once.
+        local CALIB_V = 4
         local SEED = {
-            adj = -0.016,
-            types = { Vertical = { { 1.411, 4 }, { 1.410, 4 }, { 1.411, 4 }, { 1.414, 4 }, { 1.462, 5 }, { 1.410, 4 } } },
+            adj = -0.039,
+            types = { Vertical = {
+                { 1.456, 5 }, { 1.46, 5 }, { 1.412, 4 }, { 1.459, 5 }, { 1.466, 5 }, { 1.458, 5 }, { 1.458, 5 }, { 1.477, 5 },
+                { 1.475, 5 }, { 1.453, 5 }, { 1.454, 5 }, { 1.458, 5 }, { 1.465, 5 }, { 1.458, 5 }, { 1.467, 5 }, { 1.413, 4 },
+                { 1.481, 5 }, { 1.459, 5 }, { 1.477, 5 }, { 1.477, 5 }, { 1.456, 4 }, { 1.475, 5 }, { 1.468, 5 }, { 1.467, 5 },
+                { 1.467, 5 }, { 1.477, 5 }, { 1.458, 5 }, { 1.465, 5 }, { 1.475, 5 }, { 1.477, 5 }, { 1.412, 4 }, { 1.456, 5 },
+                { 1.457, 5 }, { 1.458, 5 }, { 1.466, 5 }, { 1.459, 5 }, { 1.482, 5 }, { 1.459, 5 }, { 1.482, 5 }, { 1.459, 5 },
+            } },
         }
 
         local setIdentity = setthreadidentity or set_thread_identity or (syn and syn.set_thread_identity)
@@ -7841,7 +7856,7 @@ if HUB_CURRENT ~= 'roguecopy' then
 
         -- ---- calibration: per meter type, the frozen spots + grades ---------
         local function freshCalib()
-            local c = { v = 3, adj = SEED.adj, types = {} }
+            local c = { v = CALIB_V, adj = SEED.adj, types = {} }
             for k, list in pairs(SEED.types) do
                 local copy = {}
                 for i, smp in ipairs(list) do copy[i] = { smp[1], smp[2] } end
@@ -7858,10 +7873,14 @@ if HUB_CURRENT ~= 'roguecopy' then
         local storeNote = (not writefile) and 'Not saved: your executor has no writefile' or nil
         -- Merge a decoded calibration table into calib; true if it was usable.
         local function applyCalib(t)
-            if type(t) ~= 'table' or t.v ~= 3 or type(t.types) ~= 'table' then return false end -- older format: keep the seed
+            if type(t) ~= 'table' or type(t.v) ~= 'number' or t.v < 3 or type(t.types) ~= 'table' then return false end -- older format: keep the base
+            -- Saved before this base: the base replaces the meters it covers. Meters it has
+            -- nothing for keep what they learned, and so does the correction, measured on
+            -- this player's own connection.
+            local beforeBase = t.v < CALIB_V
             calib.adj = math.clamp(tonumber(t.adj) or calib.adj, -0.15, 0.15)
             for k, e in pairs(t.types) do
-                if type(k) == 'string' and type(e) == 'table' and type(e.s) == 'table' then
+                if type(k) == 'string' and type(e) == 'table' and type(e.s) == 'table' and not (beforeBase and SEED.types[k]) then
                     local list = {}
                     for _, smp in ipairs(e.s) do
                         local f, g = type(smp) == 'table' and tonumber(smp[1]), type(smp) == 'table' and tonumber(smp[2])
@@ -7948,10 +7967,10 @@ if HUB_CURRENT ~= 'roguecopy' then
         -- The lead: one round trip x ping comp, corrected by the measured landing delay.
         local function leadFor(r) return math.clamp(r * pingComp() + calib.adj, 0, 0.5) end
         -- Aim for a shot in absolute bar units (nil until the bar's direction is known).
-        local function aimFor(s)
+        local function aimFor(s, speed)
             if not s.base then return nil end
             local a, lo, hi, how = estimate(entryFor(s.mtype).s)
-            if not a then a, how = s.base + BASE_TARGET, 'default (no shots learned yet)' end
+            if not a then a, how = s.base + (speed or BASE_SPEED) * BASE_HOLD, 'default (no shots learned yet)' end
             return a + trimNow(), lo, hi, how
         end
         local shownType = 'Vertical'
@@ -7981,7 +8000,7 @@ if HUB_CURRENT ~= 'roguecopy' then
             calib = freshCalib()
             table.clear(recent); srvRef, lastPrec = nil, nil
             saveCalib(); showCalib()
-            Library:Notify('Meter calibration reset to the built-in starting point', 3)
+            Library:Notify('Meter calibration reset to the built-in memory', 3)
         end
         -- Share a calibration as a short code: PBM1.<adj ms>.<Type>-<shots>-<perfects>-<spots>
         -- with every remembered spot packed into 4 base-36 characters
@@ -8022,7 +8041,7 @@ if HUB_CURRENT ~= 'roguecopy' then
         local function parseCalibCode(code)
             local parts = string.split(code, '.')
             if parts[1] ~= 'PBM1' or not tonumber(parts[2]) then return nil end
-            local t = { v = 3, adj = tonumber(parts[2]) / 1000, types = {} }
+            local t = { v = CALIB_V, adj = tonumber(parts[2]) / 1000, types = {} }
             for i = 3, #parts do
                 local k, shots, perf, data = parts[i]:match('^(%w+)%-(%d+)%-(%d+)%-(%w+)$')
                 if not k or #data % 4 ~= 0 then return nil end
@@ -8054,10 +8073,11 @@ if HUB_CURRENT ~= 'roguecopy' then
                 local ok, j = pcall(function() return HttpService:JSONDecode(text) end)
                 t = ok and j or nil
             end
-            if type(t) ~= 'table' or t.v ~= 3 then
+            if type(t) ~= 'table' or type(t.v) ~= 'number' or t.v < 3 then
                 Library:Notify('That is not a calibration code (copy one with "Copy calibration code")', 4)
                 return
             end
+            t.v = CALIB_V -- picked by hand, so it replaces the base too
             calib = freshCalib()
             applyCalib(t)
             saveCalib(); showCalib()
@@ -8274,7 +8294,7 @@ if HUB_CURRENT ~= 'roguecopy' then
             if n < 2 or not s.base then return end
             local last = s.samples[n]
             local c, b = fit(s)
-            local aim = aimFor(s)
+            local aim = aimFor(s, b)
             -- Bar fell back short of the aim, or stopped updating for good after real
             -- movement: the aim sits past what this bar will do, so let go now.
             if s.peak >= 0.3 and ((last.p < s.peak - 0.02) or (n >= 5 and now - last.t > 0.35)) then

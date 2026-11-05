@@ -7225,6 +7225,8 @@ if HUB_CURRENT ~= 'roguecopy' then
                 :AddKeyPicker('PBSprintBoostKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Faster sprint' })
             SprintBox:AddSlider('PBSprintMult', { Text = 'Sprint speed', Default = 1.08, Min = 1, Max = 1.3, Rounding = 2, Suffix = 'x',
                 Tooltip = 'Normal sprint tops out around 20 studs/s. 1.08x is about +1.6 studs/s.' })
+            SprintBox:AddToggle('PBInfStamina', { Text = 'Infinite stamina (RISKY)', Default = false, Risky = true,
+                Tooltip = 'RISKY. The server owns your stamina, so this only keeps your sprint SPEED when the bar is empty (your own client decides your speed). The server sees you moving faster than your stamina allows and can snap you back, other players see you tired but sprinting, and dribble moves still fail when the real bar is low.' })
             MoveBox:AddToggle('PBDribbleBoost', { Text = 'Longer dribble moves', Default = false,
                 Tooltip = 'The double-tap C / Z moves (Tween, Double Crossover; with sprint held they carry you forward) travel this much further.' })
                 :AddKeyPicker('PBDribbleBoostKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Longer dribble moves' })
@@ -7802,6 +7804,33 @@ if HUB_CURRENT ~= 'roguecopy' then
         --    snapshots, so its rendered positions are fitted to an arc and stepped forward
         --    with a ball-sized cast that bounces off the rim / backboard until it lands.
         ;(function()
+            local FinishBox = Tabs.Shooting:AddRightGroupbox('Finishing')
+            FinishBox:AddLabel('Self lob throws the game\'s own lob pass to yourself (what your F key sends) when you drive at the hoop.', true)
+            local LobStatus = FinishBox:AddLabel('Idle', true)
+            FinishBox:AddToggle('PBSelfLob', { Text = 'Auto self lob', Default = false,
+                Tooltip = 'With the ball and within range of the hoop you attack, it lobs to yourself. At most once every 2.5 s.' })
+                :AddKeyPicker('PBSelfLobKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto self lob' })
+            FinishBox:AddSlider('PBLobRange', { Text = 'Lob within', Default = 12, Min = 5, Max = 20, Rounding = 0, Suffix = ' studs' })
+            FinishBox:AddToggle('PBLobDriving', { Text = 'Only while driving at the hoop', Default = true })
+            FinishBox:AddToggle('PBLobJump', { Text = 'Jump for the catch', Default = true,
+                Tooltip = 'Presses Space for you after the lob, like catching an alley-oop. Turn it off if the catch works on its own.' })
+            FinishBox:AddSlider('PBLobJumpDelay', { Text = 'Jump after', Default = 0.35, Min = 0, Max = 1.5, Rounding = 2, Suffix = ' s' })
+            FinishBox:AddDivider()
+            FinishBox:AddToggle('PBAntiClutch', { Text = 'Anti clutch', Default = false,
+                Tooltip = 'Stops your own clutch requests (Q, F, and on controller the clutch every Y press sends) so a dunk is not turned into a clutch layup by accident. It cannot make the server pick a dunk.' })
+
+            local AnkleBox = Tabs.Dribbling:AddRightGroupbox('Ankle Breaker')
+            AnkleBox:AddLabel('Throws a crossover the moment a nearby defender commits one way, or a stepback when he rushes you. The server decides if he falls (your badges, his bite).', true)
+            local AnkleStatus = AnkleBox:AddLabel('Idle', true)
+            AnkleBox:AddToggle('PBAnkle', { Text = 'Auto ankle breaker', Default = false })
+                :AddKeyPicker('PBAnkleKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto ankle breaker' })
+            AnkleBox:AddSlider('PBAnkleRange', { Text = 'Range', Default = 7, Min = 3, Max = 12, Rounding = 1, Suffix = ' studs' })
+            AnkleBox:AddSlider('PBAnkleHuman', { Text = 'Humanization', Default = 50, Min = 0, Max = 100, Rounding = 0, Suffix = ' %',
+                Tooltip = 'Higher waits a human reaction time (up to about a quarter second, a little random) before the move. 0 = instant.' })
+            AnkleBox:AddToggle('PBAnkleStepback', { Text = 'Stepback when he rushes you', Default = true })
+            AnkleBox:AddToggle('PBAnkleEscape', { Text = 'Escape moves (sprint version)', Default = true })
+            AnkleBox:AddSlider('PBAnkleGap', { Text = 'Wait between moves', Default = 1.8, Min = 0.6, Max = 4, Rounding = 1, Suffix = ' s' })
+
             local StealBox = Tabs.Players:AddLeftGroupbox('Auto Steal')
             StealBox:AddLabel('Presses steal for you when an opponent with the ball is in reach in front of you. The server decides if it works, and reaching in too often can draw fouls.', true)
             local StealStatus = StealBox:AddLabel('Idle', true)
@@ -7948,6 +7977,215 @@ if HUB_CURRENT ~= 'roguecopy' then
                 end
                 if steal.tries > 0 then msg = ('%s\n%d of %d tries got the ball'):format(msg, steal.wins, steal.tries) end
                 stealText(msg)
+            end))
+
+            -- ---- moves: self lob, ankle breaker, infinite stamina -------------------
+            local inRemotes = {}
+            local function fire(name, ...)
+                local r = inRemotes[name]
+                if not (r and r.Parent) then
+                    local ok, x = pcall(function() return game:GetService('ReplicatedStorage').Aero.AeroRemoteServices.InputService[name] end)
+                    r = (ok and typeof(x) == 'Instance' and x:IsA('RemoteEvent')) and x or nil
+                    inRemotes[name] = r
+                end
+                if not r then return false end
+                local args = table.pack(...)
+                return (pcall(function() r:FireServer(table.unpack(args, 1, args.n)) end))
+            end
+            local function labelSetter(lbl)
+                local last
+                return function(t) if t ~= last then last = t; pcall(lbl.SetText, lbl, t) end end
+            end
+            local function myChar()
+                local chars = workspace:FindFirstChild('Characters')
+                local me = chars and chars:FindFirstChild(LocalPlayer.Name)
+                return chars, me, me and me:FindFirstChild('HumanoidRootPart')
+            end
+
+            -- Auto self lob: Pass{PassType = 4 (lob), Player = me} is exactly what the game
+            -- sends for a self lob (keyboard F adds a Clutch(true); gamepad / mobile send
+            -- only the pass). The thrower becomes Action "CatchingLob"; Space then is
+            -- Shoot{Shoot = true, UseSpace = true, Input = "E"} + Jump(), {Shoot = false} on release.
+            local lobText = labelSetter(LobStatus)
+            local lob = { lastAt = -1e9, since = nil, thrownAt = nil, jumped = false, releaseAt = nil, vel = Vector3.zero }
+            htrack(RunService.Heartbeat:Connect(function()
+                local now = os.clock()
+                if lob.releaseAt and now >= lob.releaseAt then
+                    lob.releaseAt = nil
+                    if not on('PBAutoRelease') then fire('Shoot', { Shoot = false }) end -- auto release times it when on
+                end
+                if not on('PBSelfLob') then lob.since, lob.thrownAt = nil, nil; lobText('Idle'); return end
+                local _, me, root = myChar()
+                if not root then lobText('Waiting for your character'); return end
+                local p = root.Position
+                if lob.lastP and now > lob.lastT then
+                    local inst = flat(p - lob.lastP) / (now - lob.lastT)
+                    if inst.Magnitude > 30 then inst = inst.Unit * 30 end
+                    lob.vel = lob.vel:Lerp(inst, math.clamp((now - lob.lastT) / 0.1, 0, 1))
+                end
+                lob.lastP, lob.lastT = p, now
+                local act = attr(me, 'Action')
+                if lob.thrownAt then
+                    if act == 'CatchingLob' and on('PBLobJump') and not lob.jumped
+                        and now - lob.thrownAt >= ((Options.PBLobJumpDelay and Options.PBLobJumpDelay.Value) or 0.35) then
+                        lob.jumped = true
+                        fire('Shoot', { Shoot = true, UseSpace = true, Input = 'E' })
+                        fire('Jump')
+                        lob.releaseAt = now + 0.25
+                        lobText('Jumping for the catch')
+                    end
+                    if now - lob.thrownAt > 3 then lob.thrownAt = nil end
+                    return
+                end
+                if not attr(me, 'Basketball') then lob.since = nil; lobText('Armed - drive at the hoop with the ball'); return end
+                local goal = myGoal(me, p)
+                local toGoal = goal and flat(goal - p)
+                local d = toGoal and toGoal.Magnitude
+                local range = (Options.PBLobRange and Options.PBLobRange.Value) or 12
+                if not d then lob.since = nil; lobText('No hoop found'); return end
+                if d > range then lob.since = nil; lobText(('%d studs from the hoop'):format(math.floor(d + 0.5))); return end
+                local driving = d < 0.5 or lob.vel:Dot(toGoal.Unit) > 4
+                if (act ~= nil and act ~= '') or (on('PBLobDriving') and not driving) or now - lob.lastAt < 2.5 then
+                    lob.since = nil
+                    lobText(('In range (%.1f studs)%s'):format(d, (on('PBLobDriving') and not driving) and ' - drive at the hoop' or ''))
+                    return
+                end
+                lob.since = lob.since or now
+                if now - lob.since < 0.12 then return end
+                if fire('Pass', { PassType = 4, Player = LocalPlayer.Name }) then
+                    lob.lastAt, lob.thrownAt, lob.jumped, lob.since = now, now, false, nil
+                    lobText(('Lobbed at %.1f studs'):format(d))
+                end
+            end))
+
+            -- Auto ankle breaker: whether a defender falls is rolled on the server (badges,
+            -- and him "biting the wrong way"). This throws the move at that moment:
+            -- Dribble(combo, sprintHeld, direction); crossover = "Z" with the ball in the
+            -- right hand, "C" in the left; stepback = "X". The game's own "Snatched Ankles"
+            -- grade (InterfaceService.Grade id 36) counts the ones that worked.
+            local ankText = labelSetter(AnkleStatus)
+            local ank = { lastMove = -1e9, tries = 0, snatched = 0, armAt = nil, armKind = nil, track = setmetatable({}, { __mode = 'k' }) }
+            local rng = Random.new()
+            local function velOf(m, r, now)
+                local tr = ank.track[m]
+                local p = flat(r.Position)
+                if not tr or now - tr.t > 0.3 then
+                    tr = { p = p, t = now, v = Vector3.zero }
+                    ank.track[m] = tr
+                    return tr.v
+                end
+                if now > tr.t then
+                    local inst = (p - tr.p) / (now - tr.t)
+                    if inst.Magnitude > 30 then inst = inst.Unit * 30 end
+                    tr.v = tr.v:Lerp(inst, math.clamp((now - tr.t) / 0.06, 0, 1))
+                    tr.p, tr.t = p, now
+                end
+                return tr.v
+            end
+            task.spawn(function()
+                local RS = game:GetService('ReplicatedStorage')
+                local ars = RS:WaitForChild('Aero', 60)
+                ars = ars and ars:WaitForChild('AeroRemoteServices', 60)
+                local f = ars and ars:WaitForChild('InterfaceService', 30)
+                local g = f and f:WaitForChild('Grade', 30)
+                if g and g:IsA('RemoteEvent') then
+                    htrack(g.OnClientEvent:Connect(function(id)
+                        if tostring(id) == '36' then ank.snatched = ank.snatched + 1 end
+                    end))
+                end
+            end)
+            local function ankStatus(t)
+                if ank.tries > 0 then t = ('%s\n%d ankles snatched from %d moves'):format(t, ank.snatched, ank.tries) end
+                ankText(t)
+            end
+            htrack(RunService.Heartbeat:Connect(function()
+                if not on('PBAnkle') then ank.armAt = nil; ankText('Idle'); return end
+                local now = os.clock()
+                local chars, me, root = myChar()
+                if not root then ankStatus('Waiting for your character'); return end
+                if not attr(me, 'Basketball') then ank.armAt = nil; ankStatus('Armed - waiting for the ball'); return end
+                local myP, look = flat(root.Position), flat(root.CFrame.LookVector)
+                local range = (Options.PBAnkleRange and Options.PBAnkleRange.Value) or 7
+                local best, bd, br
+                for _, m in ipairs(chars:GetChildren()) do
+                    local r = m ~= me and m:IsA('Model') and m:FindFirstChild('HumanoidRootPart')
+                    if r and isFoe(m, me) then
+                        velOf(m, r, now)
+                        local off = flat(r.Position) - myP
+                        local d = off.Magnitude
+                        if d <= range and d > 0.5 and (look.Magnitude < 0.1 or off.Unit:Dot(look.Unit) > 0.3) and (not bd or d < bd) then
+                            best, bd, br = m, d, r
+                        end
+                    end
+                end
+                if not best then ank.armAt = nil; ankStatus('Armed - no defender in range'); return end
+                local u = (flat(br.Position) - myP).Unit
+                local v = velOf(best, br, now)
+                local along = v:Dot(u)
+                local lat = v - u * along
+                local kind
+                if on('PBAnkleStepback') and -along > 9 and bd < range * 0.8 then
+                    kind = 'stepback'
+                elseif lat.Magnitude > 7 then
+                    kind = 'crossover'
+                end
+                local act = attr(me, 'Action')
+                local gap = (Options.PBAnkleGap and Options.PBAnkleGap.Value) or 1.8
+                if not kind or (act ~= nil and act ~= '') or now - ank.lastMove < gap then
+                    ank.armAt = nil
+                    ankStatus(('Watching %s (%.1f studs)'):format(best.Name, bd))
+                    return
+                end
+                -- a human reaction before the move
+                local hu = math.clamp(((Options.PBAnkleHuman and Options.PBAnkleHuman.Value) or 50) / 100, 0, 1)
+                if not ank.armAt or ank.armKind ~= kind then
+                    ank.armAt, ank.armKind = now + (0.04 + 0.2 * hu) * (0.8 + 0.4 * rng:NextNumber()), kind
+                    return
+                end
+                if now < ank.armAt then return end
+                ank.armAt = nil
+                local combo, dir
+                if kind == 'stepback' then
+                    combo, dir = 'X', -u
+                else
+                    combo = (attr(me, 'Hand') == 'L') and 'C' or 'Z'
+                    local goal = myGoal(me, root.Position)
+                    local fwd = goal and flat(goal - root.Position)
+                    fwd = (fwd and fwd.Magnitude > 0.5) and fwd.Unit or u
+                    dir = (-lat.Unit + fwd * 0.5).Unit
+                end
+                if fire('Dribble', combo, on('PBAnkleEscape') and true or false, dir) then
+                    ank.lastMove = now
+                    ank.tries = ank.tries + 1
+                    ankStatus(('%s on %s'):format(kind == 'stepback' and 'Stepback' or 'Crossover', best.Name))
+                end
+            end))
+
+            -- Infinite stamina (RISKY): the sprint bonus needs Stamina > 0.25 on my own
+            -- character (Movement/Types/Base.lua UpdateSpeed). The server owns the real
+            -- value; this keeps a local copy full so my client keeps sprint speed.
+            local stamOn = false
+            local function fillStamina(me)
+                local cur = me:GetAttribute('Stamina')
+                if type(cur) == 'number' and cur < 100 then pcall(me.SetAttribute, me, 'Stamina', 100) end
+            end
+            local stamConn, stamFor
+            htrack({ Disconnect = function() if stamConn then stamConn:Disconnect() end end })
+            htrack(RunService.Heartbeat:Connect(function()
+                local _, me = myChar()
+                if on('PBInfStamina') and me then
+                    if stamFor ~= me then
+                        if stamConn then stamConn:Disconnect() end
+                        stamFor = me
+                        stamConn = me:GetAttributeChangedSignal('Stamina'):Connect(function()
+                            if on('PBInfStamina') then fillStamina(me) end
+                        end)
+                    end
+                    fillStamina(me)
+                    stamOn = true
+                elseif stamOn then
+                    stamOn = false -- the server's next update puts the real value back
+                end
             end))
 
             if not Drawing then
@@ -8559,6 +8797,7 @@ if HUB_CURRENT ~= 'roguecopy' then
         end
 
         local shootRemote -- InputService.Shoot (resolved async below)
+        local clutchRemote -- InputService.Clutch (Anti clutch drops the game's own requests)
         local shot        -- the live shot { t0, model, samples, origin, u, base, peak, conn, released, userRelAt, ... }
         local lastShot    -- the most recent shot (graded when its feedback arrives)
         local lastGW      -- most recent green window for my character
@@ -8664,6 +8903,10 @@ if HUB_CURRENT ~= 'roguecopy' then
                 local nmOld
                 local okH = pcall(function()
                     nmOld = hookMeta(game, '__namecall', function(self, ...)
+                        if nmOld and clutchRemote and self == clutchRemote and not canCall() and getNC() == 'FireServer'
+                            and Toggles.PBAntiClutch and Toggles.PBAntiClutch.Value then
+                            return -- Anti clutch: the game's own clutch request is not sent
+                        end
                         if nmOld and shootRemote and self == shootRemote and not canCall() and getNC() == 'FireServer' then
                             local a = ...
                             if type(a) == 'table' and a.Shoot == false and a.Input == nil then
@@ -8743,6 +8986,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                 return (r and r:IsA('RemoteEvent')) and r or nil
             end
             shootRemote = remote('InputService', 'Shoot')
+            clutchRemote = remote('InputService', 'Clutch')
             if not shootRemote then Library:Notify('PracticalBB: InputService.Shoot not found - Auto Perfect Release inactive', 6) end
             local meter    = remote('GameplayService', 'Meter')
             local reg      = remote('MeterService', 'RegisterPacket')

@@ -158,6 +158,51 @@ if HUB_CURRENT ~= 'roguecopy' then
         Center = true, AutoShow = true, TabPadding = 8, MenuFadeTime = 0.2,
     })
 
+    -- ===== Shared Misc tab (every game gets one) ===========================
+    -- Game ids + tools that don't belong to one game. Tools load from the hub
+    -- repo when you click (newest push), so nothing runs until then.
+    local HUB_REPO = 'zambiiezz123/test' -- also named in the library loader at the top
+    local function hubFile(path)
+        local okRef, ref = pcall(function()
+            return (game:HttpGet('https://github.com/' .. HUB_REPO .. '.git/info/refs?service=git-upload-pack'):match('(%x+) refs/heads/main') or ''):sub(-40)
+        end)
+        if not okRef or type(ref) ~= 'string' or #ref ~= 40 then ref = 'main' end
+        return game:HttpGet('https://raw.githubusercontent.com/' .. HUB_REPO .. '/' .. ref .. '/' .. path)
+    end
+    local function buildMiscTab(Tab, gameName, placeName)
+        local GameBox = Tab:AddLeftGroupbox(gameName)
+        GameBox:AddLabel(('Place: %s (%d)\nUniverse: %d\nServer: %s'):format(placeName or 'unknown', game.PlaceId, game.GameId,
+            (game.JobId ~= '' and game.JobId:sub(1, 8) .. '...') or 'none'), true)
+        local function copy(what, value)
+            if setclipboard then pcall(setclipboard, tostring(value)) end
+            Library:Notify(('Copied %s: %s'):format(what, tostring(value)), 4)
+        end
+        GameBox:AddButton({ Text = 'Copy PlaceId', Func = function() copy('PlaceId', game.PlaceId) end })
+            :AddButton({ Text = 'Copy GameId', Func = function() copy('GameId', game.GameId) end })
+        GameBox:AddButton({ Text = 'Copy JobId', Func = function() copy('JobId', game.JobId) end,
+            Tooltip = 'The id of this server, to get back into the same server.' })
+            :AddButton({ Text = 'Copy all', Func = function()
+                copy('ids', ('PlaceId %d | GameId %d | JobId %s'):format(game.PlaceId, game.GameId, game.JobId))
+            end })
+
+        local ToolBox = Tab:AddRightGroupbox('Tools')
+        ToolBox:AddLabel('Remote spy: logs every remote the game sends and receives, in its own window. Right Shift shows / hides it.', true)
+        ToolBox:AddButton({ Text = 'Open remote spy', Func = function()
+            if getgenv().RemoteSpy_Unload then
+                return Library:Notify('Remote spy is already open (Right Shift shows / hides it)', 3)
+            end
+            Library:Notify('Loading remote spy...', 2)
+            task.spawn(function()
+                local ok, err = pcall(function() loadstring(hubFile('tools/RemoteSpy.lua'))() end)
+                if not ok then Library:Notify('Remote spy did not load: ' .. tostring(err), 6) end
+            end)
+        end }):AddButton({ Text = 'Close remote spy', Func = function()
+            if not getgenv().RemoteSpy_Unload then return Library:Notify('Remote spy is not open', 2) end
+            pcall(getgenv().RemoteSpy_Unload)
+            Library:Notify('Remote spy closed', 2)
+        end })
+    end
+
     if HUB_CURRENT == 'forgottenstories' then
         local Players     = game:GetService('Players')
         local LocalPlayer = Players.LocalPlayer
@@ -7123,10 +7168,15 @@ if HUB_CURRENT ~= 'roguecopy' then
         local StatsSvc    = game:GetService('Stats')
         local PLACE_NAMES = { [115776365257536] = 'Plaza', [119587547774646] = 'Private Gym', [118669925076970] = 'Park' }
 
-        local Tab = Window:AddTab('PracticalBB')
+        local Tabs = {
+            Shooting  = Window:AddTab('Shooting'),
+            Dribbling = Window:AddTab('Dribbling'),
+            Players   = Window:AddTab('Players'),
+            Misc      = Window:AddTab('Misc'),
+        }
 
-        -- ===== UI: Auto Perfect Release ===================================
-        local MeterBox = Tab:AddLeftGroupbox('Auto Perfect Release')
+        -- ===== UI: Shooting ===============================================
+        local MeterBox = Tabs.Shooting:AddLeftGroupbox('Auto Perfect Release')
         local MeterStatus = MeterBox:AddLabel('Idle', true)
         MeterBox:AddToggle('PBAutoRelease', {
             Text = 'Auto perfect release', Default = false,
@@ -7141,23 +7191,9 @@ if HUB_CURRENT ~= 'roguecopy' then
         if not (setfpscap and getfpscap) then
             MeterBox:AddLabel('Your executor has no setfpscap / getfpscap, so the FPS boost stays off.', true)
         end
-        MeterBox:AddToggle('PBSubFrame', { Text = 'Sub-frame timing', Default = true,
-            Tooltip = 'In the frame just before the perfect moment, wait out the last few milliseconds and send the release exactly then, instead of rounding to the nearest frame. Holds the game for at most one frame, once per shot.' })
-        MeterBox:AddToggle('PBServerClock', { Text = 'Server clock sync', Default = true,
-            Tooltip = 'Read-only. The game\'s own position stream arrives 60 times a second stamped with the server\'s send time. How late it is arriving right now (frame phase + network jitter), compared with usual, shifts the release, shot by shot.' })
-        MeterBox:AddToggle('PBMeterLog', { Text = 'Log meter (console)', Default = false,
-            Tooltip = 'Print every shot: meter type, fill updates, where the release went out, where the server froze the bar, the landing delay, the grade and the aim. Works with Auto off too.' })
 
-        -- ===== UI: Info ===================================================
-        local InfoBox = Tab:AddRightGroupbox('PracticalBB')
-        InfoBox:AddLabel(('Place: %s (%d)\nUniverse: %d'):format(PLACE_NAMES[game.PlaceId] or 'unknown', game.PlaceId, game.GameId), true)
-        InfoBox:AddButton({ Text = 'Copy PlaceId', Func = function()
-            if setclipboard then pcall(setclipboard, tostring(game.PlaceId)) end
-            Library:Notify('Copied PlaceId: ' .. tostring(game.PlaceId), 4)
-        end }):AddButton({ Text = 'Copy GameId (universe)', Func = function()
-            if setclipboard then pcall(setclipboard, tostring(game.GameId)) end
-            Library:Notify('Copied GameId: ' .. tostring(game.GameId), 4)
-        end })
+        -- ===== UI: Misc (ids + tools, shared) ==============================
+        buildMiscTab(Tabs.Misc, 'PracticalBB', PLACE_NAMES[game.PlaceId])
 
         -- ===== Movement: faster sprint + longer dribble moves ==============
         -- From the decompiled client (Modules/Components/Character.lua, .../Character/
@@ -7180,13 +7216,14 @@ if HUB_CURRENT ~= 'roguecopy' then
         -- the velocity it is scaled, and the unscaled value is put back before the next
         -- frame's update, so the game's own easing never compounds the boost.
         ;(function()
-            local MoveBox = Tab:AddRightGroupbox('Movement')
+            local MoveBox = Tabs.Dribbling:AddLeftGroupbox('Dribble Moves')
             MoveBox:AddLabel('Small, believable boosts. Your character is moved by your own client and its position is sent to the server, so these really move you. Keep them subtle: other players see it, and the server may check speeds.', true)
             local MoveStatus = MoveBox:AddLabel('Idle', true)
-            MoveBox:AddToggle('PBSprintBoost', { Text = 'Faster sprint', Default = false,
+            local SprintBox = Tabs.Dribbling:AddRightGroupbox('Sprint')
+            SprintBox:AddToggle('PBSprintBoost', { Text = 'Faster sprint', Default = false,
                 Tooltip = 'While you hold your sprint key (Shift) and have stamina, you run this much faster than the normal sprint.' })
                 :AddKeyPicker('PBSprintBoostKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Faster sprint' })
-            MoveBox:AddSlider('PBSprintMult', { Text = 'Sprint speed', Default = 1.08, Min = 1, Max = 1.3, Rounding = 2, Suffix = 'x',
+            SprintBox:AddSlider('PBSprintMult', { Text = 'Sprint speed', Default = 1.08, Min = 1, Max = 1.3, Rounding = 2, Suffix = 'x',
                 Tooltip = 'Normal sprint tops out around 20 studs/s. 1.08x is about +1.6 studs/s.' })
             MoveBox:AddToggle('PBDribbleBoost', { Text = 'Longer dribble moves', Default = false,
                 Tooltip = 'The double-tap C / Z moves (Tween, Double Crossover; with sprint held they carry you forward) travel this much further.' })
@@ -7384,9 +7421,9 @@ if HUB_CURRENT ~= 'roguecopy' then
             --    learns how long shooters hold (meter start -> freeze) and jumps that long
             --    after a nearby opponent's meter starts, minus your lead and round trip.
             ;(function()
-                local DefBox = Tab:AddLeftGroupbox('Defense')
-                DefBox:AddLabel('Auto guard steers you while you hold G (the game\'s own guard movement does the moving). Auto block jumps for you when an opponent near you shoots.', true)
-                local DefStatus = DefBox:AddLabel('Idle', true)
+                local DefBox = Tabs.Players:AddLeftGroupbox('Auto Guard')
+                DefBox:AddLabel('Steers you while you hold G next to the ball handler (the game\'s own guard movement does the moving).', true)
+                local GuardStatus = DefBox:AddLabel('Idle', true)
                 DefBox:AddToggle('PBAutoGuard', { Text = 'Auto guard (hold G)', Default = false,
                     Tooltip = 'Hold G next to the ball handler: you copy their movement and stay between them and the hoop they attack. Turn it on, then just hold G.' })
                     :AddKeyPicker('PBAutoGuardKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto guard' })
@@ -7396,15 +7433,18 @@ if HUB_CURRENT ~= 'roguecopy' then
                     Tooltip = 'How far in front of the handler (toward the hoop they attack) you hold. 3.25 is what the game\'s own mobile guard assist uses.' })
                 DefBox:AddSlider('PBGuardRead', { Text = 'Read ahead', Default = 0.12, Min = 0, Max = 0.3, Rounding = 2, Suffix = ' s',
                     Tooltip = 'You see other players slightly in the past, so aim where the handler will be this far ahead. Raise it if quick moves still get by, lower it if you overshoot.' })
-                DefBox:AddToggle('PBAutoBlock', { Text = 'Auto block', Default = false,
+                local BlockBox = Tabs.Players:AddRightGroupbox('Auto Block')
+                BlockBox:AddLabel('Jumps for you when an opponent near you shoots, timed to their release.', true)
+                local BlockStatus = BlockBox:AddLabel('Idle', true)
+                BlockBox:AddToggle('PBAutoBlock', { Text = 'Auto block', Default = false,
                     Tooltip = 'When an opponent within range shoots, dunks or goes up for a contact layup, you jump, timed to their release. Only while you do not have the ball and are free to jump.' })
                     :AddKeyPicker('PBAutoBlockKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto block' })
-                DefBox:AddSlider('PBBlockRange', { Text = 'Block range', Default = 10, Min = 4, Max = 16, Rounding = 1, Suffix = ' studs' })
-                DefBox:AddSlider('PBBlockLead', { Text = 'Jump before release', Default = 0.2, Min = 0, Max = 0.45, Rounding = 2, Suffix = ' s',
+                BlockBox:AddSlider('PBBlockRange', { Text = 'Block range', Default = 10, Min = 4, Max = 16, Rounding = 1, Suffix = ' studs' })
+                BlockBox:AddSlider('PBBlockLead', { Text = 'Jump before release', Default = 0.2, Min = 0, Max = 0.45, Rounding = 2, Suffix = ' s',
                     Tooltip = 'How long before the shooter lets go your jump should reach the server. Once 3 auto jumps have got blocks (with learning on), the timing of those blocks takes over.' })
-                DefBox:AddToggle('PBBlockLearn', { Text = 'Learn from my blocks', Default = true,
+                BlockBox:AddToggle('PBBlockLearn', { Text = 'Learn from my blocks', Default = true,
                     Tooltip = 'An auto jump that gets a block (your Blocks stat goes up) is remembered with how early it was, and later jumps copy that timing.' })
-                DefBox:AddToggle('PBBlockLog', { Text = 'Log blocks (console)', Default = false })
+                BlockBox:AddToggle('PBBlockLog', { Text = 'Log blocks (console)', Default = false })
 
                 local function blog(msg) if on('PBBlockLog') then print('[PB block] ' .. msg) end end
                 local function ms(x) return math.floor(x * 1000 + 0.5) end
@@ -7678,29 +7718,29 @@ if HUB_CURRENT ~= 'roguecopy' then
                 end))
 
                 -- Status + keeping the guard shadow on your current movement object.
-                local acc2, lastTxt2 = 0, nil
+                local acc2, lastTxt2, lastTxt3 = 0, nil, nil
                 htrack(RunService.Heartbeat:Connect(function(dt)
                     acc2 = acc2 + dt
                     if acc2 < 0.25 then return end
                     acc2 = 0
-                    local lines = {}
+                    local gtxt, btxt = 'Idle', 'Idle'
                     if on('PBAutoGuard') then
                         local M = findMovement()
                         if M then wrapGuard(M) end
-                        lines[#lines + 1] = (not M and 'Guard: waiting for your character')
-                            or (guardInfo.name and ('Guard: on %s (%.1f studs off the spot)'):format(guardInfo.name, guardInfo.err or 0))
-                            or 'Guard: armed - hold G next to the ball handler'
+                        gtxt = (not M and 'Waiting for your character')
+                            or (guardInfo.name and ('On %s (%.1f studs off the spot)'):format(guardInfo.name, guardInfo.err or 0))
+                            or 'Armed - hold G next to the ball handler'
                     elseif guardM then
                         unwrapGuard()
                     end
                     if on('PBAutoBlock') then
                         local lead, learned = leadNow(rtt())
-                        lines[#lines + 1] = ('Block: %s blocked / %d jumps | lead %d ms%s | shooters hold ~%.2f s'):format(
+                        btxt = ('%s blocked / %d jumps | lead %d ms%s | shooters hold ~%.2f s'):format(
                             lastBlocks ~= nil and tostring(blocks) or 'n/a', jumps, ms(lead), learned and ' (learned)' or '',
                             median(relHist.far, 0.4))
                     end
-                    local txt = (#lines > 0) and table.concat(lines, '\n') or 'Idle'
-                    if txt ~= lastTxt2 then lastTxt2 = txt; pcall(DefStatus.SetText, DefStatus, txt) end
+                    if gtxt ~= lastTxt2 then lastTxt2 = gtxt; pcall(GuardStatus.SetText, GuardStatus, gtxt) end
+                    if btxt ~= lastTxt3 then lastTxt3 = btxt; pcall(BlockStatus.SetText, BlockStatus, btxt) end
                 end))
             end)()
         end)()
@@ -7736,14 +7776,6 @@ if HUB_CURRENT ~= 'roguecopy' then
         --    the frame). At 60 FPS that is every 16.7 ms = one whole server frame of
         --    meter (~0.05), enough on its own to split Good / Perfect. While the meter
         --    is up the FPS cap is raised (setfpscap) and put back after.
-        --  * Sub-frame: in the frame just before the perfect moment the script waits
-        --    out the remaining ms and sends then, instead of rounding to a frame.
-        --  * Server clock: ReplicatedStorage.Replication (the game's position stream,
-        --    server -> client, 60/s; Controllers/Replication.lua) starts with the
-        --    server's send time (Float64, seconds since workspace SERVER_START_TIME).
-        --    Receive time (GetServerTimeNow) minus that stamp = how late updates are
-        --    arriving right now. Fill updates come down the same pipe in the same
-        --    frames, so this shot's deviation from the usual delay shifts the release.
         --  * The fill is a straight line per shot (~3.05 bar/s logged): fitted over
         --    the recent updates and anchored on the least-delayed ones instead of
         --    extrapolating the newest update.
@@ -7756,12 +7788,10 @@ if HUB_CURRENT ~= 'roguecopy' then
         local FRESH = 0.3        -- a fill update older than this = no longer tracking live
         local EDGE = 0.03        -- assumed Perfect width past the outermost Perfect when nothing bounds that side
         local FIT_N = 15         -- recent fill updates in the line fit
-        local SPIN_MAX = 0.02    -- longest in-frame wait for the exact moment
-        local STALL = 0.042      -- no fill update for this long (2.5 server frames) = the bar stopped moving
         -- The shots the aim comes from, and nothing else (Vertical meter, last 40 of 504 shots, 36
         -- of those 40 Perfect, saved 2026-11-04): where the server froze each shot + its grade, and
         -- the measured landing correction. Nothing is learned during play and nothing is saved or
-        -- read from disk. New shots go here by hand: Log meter prints each one's spot and grade.
+        -- read from disk. New shots go here by hand.
         local BASE_MEMORY = {
             adj = -0.039,
             types = { Vertical = {
@@ -7781,10 +7811,6 @@ if HUB_CURRENT ~= 'roguecopy' then
         end
         local function setStatus(t) setText(MeterStatus, t) end
         local function autoOn() return Toggles.PBAutoRelease and Toggles.PBAutoRelease.Value end
-        local function log(msg) if Toggles.PBMeterLog and Toggles.PBMeterLog.Value then print('[PB meter] ' .. msg) end end
-        local function f3(x) return type(x) == 'number' and ('%.3f'):format(x) or tostring(x) end
-        local function ms(x) return type(x) == 'number' and tostring(math.floor(x * 1000 + 0.5)) or '?' end
-        local function vecStr(v) return typeof(v) == 'Vector2' and ('(%.3f, %.3f)'):format(v.X, v.Y) or tostring(v) end
         local function rtt() -- round trip, seconds
             local ok, v = pcall(function() return StatsSvc.Network.ServerStatsItem['Data Ping']:GetValue() end)
             if ok and type(v) == 'number' and v > 0 then return v / 1000 end
@@ -7805,7 +7831,6 @@ if HUB_CURRENT ~= 'roguecopy' then
             if not ok or type(cur) ~= 'number' or cur <= 0 or cur >= want then return end -- uncapped or already higher
             if pcall(setfpscap, want) then
                 capSaved, capAt = cur, os.clock()
-                log(('fps cap %s -> %s while the meter is up'):format(tostring(cur), tostring(want)))
             end
         end
         local function restoreFps()
@@ -7816,38 +7841,6 @@ if HUB_CURRENT ~= 'roguecopy' then
         end
         htrack({ Disconnect = restoreFps })
 
-        -- ---- server clock: the stamp on the game's own position stream --------
-        local SRV_KEEP = 40 -- ~0.66 s of packets at 60/s
-        local srvT, srvD, srvI = {}, {}, 0
-        local srvRef -- the usual downlink delay (EMA over this session's shots)
-        local function onReplication(b)
-            if not (Toggles.PBServerClock and Toggles.PBServerClock.Value) then return end
-            if typeof(b) ~= 'buffer' or buffer.len(b) < 8 then return end
-            local start = workspace:GetAttribute('SERVER_START_TIME')
-            if type(start) ~= 'number' then return end
-            local d = (workspace:GetServerTimeNow() - start) - buffer.readf64(b, 0)
-            if d ~= d or d < -2 or d > 2 then return end
-            srvI = srvI % SRV_KEEP + 1
-            srvT[srvI], srvD[srvI] = os.clock(), d
-        end
-        -- Lower envelope of the downlink delay over the last 0.5 s (nil = no stream).
-        local function downlink(now)
-            local best, n = nil, 0
-            for i, t in pairs(srvT) do
-                if now - t < 0.5 then
-                    n = n + 1
-                    if not best or srvD[i] < best then best = srvD[i] end
-                end
-            end
-            return (n >= 5) and best or nil
-        end
-        -- How far this moment's delay is from the usual one (s), plus the delay itself.
-        local function phaseCorr(now)
-            if not (Toggles.PBServerClock and Toggles.PBServerClock.Value) then return 0, nil end
-            local d = downlink(now)
-            if not (d and srvRef) then return 0, d end
-            return math.clamp(d - srvRef, -0.025, 0.025), d
-        end
         local dtAvg = 1 / 60
 
         -- ---- the aim: where Perfect sits in those shots, fixed for the session --
@@ -7923,35 +7916,11 @@ if HUB_CURRENT ~= 'roguecopy' then
             for i = 1, k do top = top + cs[i] end
             return mp + top / k - b * mt, b
         end
-        -- Fill (relative to this shot's start) + speed at clock time t.
-        local function fillAt(s, t)
-            local c, b = fit(s)
-            if c then return c + b * t, b end
-            local smp = s.samples
-            local k
-            for i = #smp, 1, -1 do if smp[i].t <= t then k = i; break end end
-            if not k then return nil, 0 end
-            local last = smp[k]
-            local v = 0
-            if k > 1 and last.t > smp[1].t then v = (last.p - smp[1].p) / (last.t - smp[1].t) end
-            return last.p + math.max(v, 0) * (t - last.t), v
-        end
-        -- Had the bar stopped moving by clock time t (no update for STALL)?
-        local function staleAt(s, t)
-            for i = #s.samples, 1, -1 do
-                local e = s.samples[i]
-                if e.t <= t then return t - e.t > STALL end
-            end
-            return false
-        end
         -- The ONLY state in which the player's own release may be held back.
         local function tracking(s, now)
             if not s or s.released or s.blind then return false end
             local n = #s.samples
             return n >= 2 and (now - s.samples[n].t) < FRESH
-        end
-        local function traceStr(s, now)
-            return ('%d fill updates in %.2fs, start %s, last %s'):format(#s.samples, now - s.t0, vecStr(s.origin), vecStr(s.lastRaw))
         end
 
         local function endShot()
@@ -7988,7 +7957,6 @@ if HUB_CURRENT ~= 'roguecopy' then
                 if not s.u and p > 0.05 then s.u = d.Unit; s.base = s.origin:Dot(s.u) end
                 local t = os.clock()
                 s.samples[#s.samples + 1] = { t = t, p = p }
-                s.lastRaw = raw
                 if p > s.peak then s.peak, s.peakAt = p, t end
             end)
             shot, lastShot = s, s
@@ -7999,21 +7967,12 @@ if HUB_CURRENT ~= 'roguecopy' then
             local r = shootRemote
             return r ~= nil and (pcall(function() r:FireServer({ Shoot = false }) end))
         end
-        -- p / v relative to the shot start. why: nil = timed release, 'peak' = the
-        -- bar topped out first, otherwise a fail-safe ('timeout', 'your release ...').
-        local function release(s, p, v, lead, aim, why, r, corr, d, spin)
-            local now = os.clock()
-            s.released, s.releasedAt = true, now
-            s.relP, s.relV, s.lead, s.aim, s.why, s.relRtt = p, v, lead, aim, why, r
-            s.dNow, s.stall = d, staleAt(s, now)
+        -- Send the release now and mark the shot done.
+        local function release(s)
+            s.released, s.releasedAt = true, os.clock()
             swallowedAt = nil
             local ok = fireRelease()
-            local land = (s.base and p) and (p + s.base + (v or 0) * (lead or 0)) or nil
-            local fps = math.floor(1 / math.max(dtAvg, 1e-3) + 0.5)
             setStatus(ok and 'Released' or 'Release failed: Shoot remote not found')
-            log(('auto release at %s (abs), speed %s/s, lead %s ms (ping %s, clock corr %s ms, downlink %s ms) -> should land %s, aim %s (%s) | %d fps, in-frame wait %s ms%s | %s'):format(
-                f3(s.base and p and p + s.base or p), f3(v), ms(lead), ms(r), corr and ms(corr) or '-', d and ms(d) or '-',
-                f3(land), f3(aim), tostring(why or 'timed'), fps, ms(spin or 0), s.stall and ', bar had stopped moving' or '', traceStr(s, now)))
         end
 
         -- "Ignore my early let-go": hold back the GAME's own plain release
@@ -8035,7 +7994,7 @@ if HUB_CURRENT ~= 'roguecopy' then
                                     swallowedAt = swallowedAt or now
                                     return -- held: the timed release replaces it
                                 end
-                                if s and not s.released and not s.userRelAt then s.userRelAt = now end -- your own release (for the log)
+                                if s and not s.released and not s.userRelAt then s.userRelAt = now end -- your own release went out
                             end
                         end
                         if nmOld then return nmOld(self, ...) end
@@ -8060,7 +8019,7 @@ if HUB_CURRENT ~= 'roguecopy' then
             if swallowedAt and not (autoOn() and tracking(s, now)) then
                 swallowedAt = nil
                 if s and not s.released then
-                    release(s, (fillAt(s, now)) or s.peak, 0, 0, nil, 'your release, fill stopped updating', rtt())
+                    release(s)
                 else
                     fireRelease()
                 end
@@ -8073,11 +8032,10 @@ if HUB_CURRENT ~= 'roguecopy' then
             if not s.blind and n == 0 and now - s.t0 > 0.5 then
                 s.blind = true
                 if autoOn() then setStatus('Could not track this shot, it is yours to time') end
-                log(('meter shown (type %s) but no meterOffset updates arrived in 0.5s - this shot is not auto-timed'):format(tostring(s.mtype)))
                 return
             end
             if not autoOn() or s.blind then return end
-            if now - s.t0 > 3 then release(s, s.peak, 0, 0, nil, 'timeout', rtt()); return end
+            if now - s.t0 > 3 then release(s); return end
             if n < 2 or not s.base then return end
             local last = s.samples[n]
             local c, b = fit(s)
@@ -8085,49 +8043,15 @@ if HUB_CURRENT ~= 'roguecopy' then
             -- Bar fell back short of the aim, or stopped updating for good after real
             -- movement: the aim sits past what this bar will do, so let go now.
             if s.peak >= 0.3 and ((last.p < s.peak - 0.02) or (n >= 5 and now - last.t > 0.35)) then
-                release(s, last.p, b or 0, 0, aim, 'peak', rtt()); return
+                release(s); return
             end
             if not c or now - last.t > FRESH then return end
-            local r = rtt()
-            local corr, d = phaseCorr(now)
-            local lead = leadFor(r) + corr
-            -- Clock time at which a release lands exactly on the aim.
-            local tStar = (aim - s.base - c) / b - lead
-            local wait = tStar - now
-            if wait <= 0 then
-                release(s, c + b * now, b, lead, aim, nil, r, corr, d); return
-            end
-            if Toggles.PBSubFrame and Toggles.PBSubFrame.Value then
-                -- The next frame would come too late: wait out the last ms right here.
-                if wait <= math.min(SPIN_MAX, dtAvg * 1.05) then
-                    repeat until os.clock() >= tStar
-                    local t2 = os.clock()
-                    release(s, c + b * t2, b, lead, aim, nil, r, corr, d, t2 - now)
-                end
-            elseif wait <= dtAvg * 0.5 then
-                -- whole frames only: fire on the frame whose landing is CLOSEST to the aim
-                release(s, c + b * now, b, lead, aim, nil, r, corr, d)
-            end
+            local lead = leadFor(rtt())
+            -- Clock time at which a release lands exactly on the aim; fire on the
+            -- frame whose landing is closest to it (or now, if it is already due).
+            local wait = (aim - s.base - c) / b - lead - now
+            if wait <= dtAvg * 0.5 then release(s) end
         end))
-
-        -- After the grade: read the frozen bar and report the shot. Nothing from it reaches the aim
-        -- or the lead. The stream delay kept here is only Server clock sync's idea of "usual", for
-        -- this session.
-        local function reportShot(s, F, name, contest)
-            local how, R, v, r
-            if s.releasedAt then
-                how, R, v, r = 'auto', (s.relP and s.base) and (s.relP + s.base) or nil, s.relV, s.relRtt
-            elseif s.userRelAt then
-                local p, vv = fillAt(s, s.userRelAt)
-                how, R, v, r = 'your', (p and s.base) and (p + s.base) or nil, vv, rtt()
-            end
-            local lag = (F and R and v and v > 0.5) and (F - R) / v or nil
-            if s.dNow then srvRef = srvRef and (srvRef + 0.2 * (s.dNow - srvRef)) or s.dNow end
-            setStatus('Last shot: ' .. name)
-            log(('grade %s | %s release at %s, server froze the bar at %s, landed %s ms later (ping %s) | aim was %s | contest %s%%, green %s | %s'):format(
-                name, tostring(how or 'no'), f3(R), f3(F), ms(lag), ms(r), f3(s.aim),
-                tostring(contest), f3(s.gw), traceStr(s, s.releasedAt or s.userRelAt or os.clock())))
-        end
 
         -- Remote wiring (async: the Aero folder can stream in after injection).
         task.spawn(function()
@@ -8149,19 +8073,14 @@ if HUB_CURRENT ~= 'roguecopy' then
             if meter then htrack(meter.OnClientEvent:Connect(function(show, char, mtype)
                 if not isMine(char) then return end
                 if show then
-                    local s = beginShot(char, mtype)
+                    beginShot(char, mtype)
                     if autoOn() then raiseFps() end
-                    local a = AIM[mtype]
-                    log(('meter shown: type %s, last frozen spot %s, green window %s, aim %s'):format(tostring(mtype),
-                        vecStr(char:GetAttribute('meterOffset')), f3(s.gw), a and f3(a) or 'timed guess'))
                     if mtype == 'None' and autoOn() then
                         setStatus('Meter type is "None" - pick any meter in Settings if releases never fire')
                     end
                 elseif shot and shot.model == char then
                     local s = shot
                     if not s.released then
-                        log(('meter closed with no auto release: %s%s'):format(traceStr(s, os.clock()),
-                            s.userRelAt and (', you released at ' .. f3(((fillAt(s, s.userRelAt)) or 0) + (s.base or 0))) or ''))
                         if autoOn() and not s.blind and not s.userRelAt then setStatus('Meter closed before the timed release') end
                     end
                     endShot()
@@ -8183,23 +8102,10 @@ if HUB_CURRENT ~= 'roguecopy' then
                 local g = tonumber(grade)
                 local name = (g and GRADES[g]) or tostring(grade)
                 local s = lastShot
-                if not s or s.graded or os.clock() - s.t0 > 8 then
-                    log(('grade %s, contest %s%% (no tracked shot)'):format(name, tostring(contest)))
-                    return
-                end
+                if not s or s.graded or os.clock() - s.t0 > 8 then return end
                 s.graded = true
-                -- The bar stays frozen where the server judged the release; give the
-                -- last attribute update a moment to arrive, then read it.
-                task.delay(0.25, function()
-                    local raw = asVec(char:GetAttribute('meterOffset'))
-                    local F = (raw and s.u) and raw:Dot(s.u) or nil
-                    local ok, err = pcall(reportShot, s, F, name, contest)
-                    if not ok then log('report error: ' .. tostring(err)) end
-                end)
+                setStatus('Last shot: ' .. name)
             end)) end
-            -- server clock: the game's own position stream (read-only listener)
-            local repl = RS:WaitForChild('Replication', 30)
-            if repl and repl:IsA('UnreliableRemoteEvent') then htrack(repl.OnClientEvent:Connect(onReplication)) end
         end)
 
         if Toggles.PBAutoRelease then Toggles.PBAutoRelease:OnChanged(function()

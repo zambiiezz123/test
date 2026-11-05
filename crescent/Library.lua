@@ -1484,28 +1484,94 @@ local function processButtonParams(Obj, ...)
     assert(type(Obj.Func) == 'function', 'AddButton: `Func` callback is missing.')
 end
 
+-- Button text that is wider than its box shrinks (13 down to 10), and is cut
+-- with "..." only if it still doesn't fit. Re-fits when the box or text changes.
+local BUTTON_TEXT_MAX, BUTTON_TEXT_MIN = 13, 10
+local Measure = New('TextLabel', {
+    Position = fromOffset(-5000, -5000), Size = fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X,
+    TextTransparency = 1, Parent = Overlay,
+})
+-- width of a button's text at full size (unscaled pixels)
+local function textWidth(str)
+    Measure.FontFace = Fonts.body
+    Measure.TextSize = BUTTON_TEXT_MAX
+    Measure.Text = str
+    return Measure.TextBounds.X
+end
+
+local function fitButtonText(btn)
+    local function fit()
+        local size = BUTTON_TEXT_MAX
+        btn.TextTruncate = Enum.TextTruncate.None
+        btn.TextSize = size
+        while not btn.TextFits and size > BUTTON_TEXT_MIN do
+            size = size - 1
+            btn.TextSize = size
+        end
+        if not btn.TextFits then btn.TextTruncate = Enum.TextTruncate.AtEnd end
+    end
+    btn:GetPropertyChangedSignal('AbsoluteSize'):Connect(fit)
+    btn:GetPropertyChangedSignal('Text'):Connect(fit)
+    btn:GetPropertyChangedSignal('FontFace'):Connect(fit)
+    fit()
+    -- once more after the font has had time to load
+    task.delay(1.5, function() if btn.Parent then fit() end end)
+end
+
 function GroupFuncs:AddButton(...)
     local Button = {}
     processButtonParams(Button, ...)
 
     local row, entry = self:_row(29, Button.Text)
     local strip = New('Frame', { BackgroundTransparency = 1, Position = fromOffset(GUTTER, 4), Size = UDim2new(1, -2 * GUTTER, 0, 20), Parent = row })
-    New('UIListLayout', { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6), Parent = strip })
+    local stripLayout = New('UIListLayout', { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6), Parent = strip })
     local members = {}
 
+    -- Buttons share the row while every label fits (shrunk at most to the
+    -- minimum size); otherwise they stack, one full-width button per line.
     local function relayout()
         local n = #members
-        for _, b in ipairs(members) do
-            b.Outer.Size = UDim2new(1 / n, -6 * (n - 1) / n, 1, 0)
+        local width = strip.AbsoluteSize.X / curScale()
+        local stack = false
+        if n > 1 and width > 0 then
+            local per = (width - 6 * (n - 1)) / n - 10
+            for _, b in ipairs(members) do
+                if textWidth(b.Outer.Text) * (BUTTON_TEXT_MIN + 0.5) / BUTTON_TEXT_MAX > per then stack = true end
+            end
+        end
+        if stack then
+            stripLayout.FillDirection = Enum.FillDirection.Vertical
+            stripLayout.Padding = UDim.new(0, 4)
+            for _, b in ipairs(members) do b.Outer.Size = UDim2new(1, 0, 0, 20) end
+            local h = n * 20 + (n - 1) * 4
+            strip.Size = UDim2new(1, -2 * GUTTER, 0, h)
+            row.Size = UDim2new(1, 0, 0, h + 9)
+        else
+            stripLayout.FillDirection = Enum.FillDirection.Horizontal
+            stripLayout.Padding = UDim.new(0, 6)
+            for _, b in ipairs(members) do b.Outer.Size = UDim2new(1 / n, -6 * (n - 1) / n, 0, 20) end
+            strip.Size = UDim2new(1, -2 * GUTTER, 0, 20)
+            row.Size = UDim2new(1, 0, 0, 29)
         end
     end
+    local lastWidth = -1
+    strip:GetPropertyChangedSignal('AbsoluteSize'):Connect(function()
+        local w = strip.AbsoluteSize.X
+        if math.abs(w - lastWidth) < 0.5 then return end
+        lastWidth = w
+        relayout()
+    end)
+    table.insert(Restylers, relayout)
+    task.delay(1.5, function() if strip.Parent then relayout() end end)
 
     local function makeButton(Obj)
         local btn = New('TextButton', { Size = fromScale(1, 1), LayoutOrder = #members + 1, Parent = strip }, { BackgroundColor3 = 'Element' })
         local stroke = New('UIStroke', { Parent = btn }, { Color = 'Border' })
+        New('UIPadding', { PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5), Parent = btn })
         setText(btn, Obj.Text)
         Obj.Outer, Obj.Inner, Obj.Label = btn, btn, btn
         members[#members + 1] = Obj
+        fitButtonText(btn)
         relayout()
 
         local hover = false
@@ -2935,9 +3001,11 @@ function Library:SetPref(key, value)
         Prefs.font = value
         loadFonts(value)
         for inst, kind in pairs(FontOf) do inst.FontFace = Fonts[kind] or Fonts.body end
+        restyle()
     elseif key == 'lowercase' then
         Prefs.lowercase = not not value
         for inst, raw in pairs(TextRaw) do inst.Text = shown(raw) end
+        restyle()
     elseif key == 'scale' then
         Prefs.scale = clamp(tonumber(value) or 100, 60, 150)
     elseif key == 'keybinds' then

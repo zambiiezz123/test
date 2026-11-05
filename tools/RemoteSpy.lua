@@ -8,6 +8,8 @@
       indexed accessor you can paste straight back into an executor).
     • Draggable window, Pause / Clear, live search filter, per-remote ignore.
     • Toggle key: Right Shift (change TOGGLE_KEY below). Close button unloads.
+    • Looks like the Crescent menu and follows its saved UI settings (accent,
+      font, lowercase). No image assets: every icon is frames or text.
 
     Requires an executor with hookmetamethod + getnamecallmethod (Synapse,
     Script-Ware, Wave, Delta, Solara, etc.). setclipboard is used for copy.
@@ -63,36 +65,151 @@ if not (hookMeta and getNCMethod) then
 end
 
 -- ===========================================================================
--- 2. Theme
+-- 2. Theme  (the Crescent look: black, white accent, square corners)
 -- ===========================================================================
-local T = {
-    bg        = Color3.fromRGB(22, 22, 30),
-    panel     = Color3.fromRGB(28, 28, 40),
-    panelAlt  = Color3.fromRGB(33, 34, 48),
-    row       = Color3.fromRGB(31, 32, 46),
-    rowHover  = Color3.fromRGB(40, 42, 60),
-    rowSelect = Color3.fromRGB(48, 52, 78),
-    stroke    = Color3.fromRGB(48, 50, 70),
-    text      = Color3.fromRGB(192, 202, 245),
-    textDim   = Color3.fromRGB(120, 126, 160),
-    accent    = Color3.fromRGB(122, 162, 247),   -- blue  (FireServer)
-    accent2   = Color3.fromRGB(158, 206, 106),   -- green (InvokeServer)
-    danger    = Color3.fromRGB(247, 118, 142),
-}
+-- Colours and UI settings follow the user's Crescent menu: the live library
+-- (getgenv().Library, when it is Crescent) or else Crescent/settings.json.
+-- Everything falls back to Crescent's defaults.
+local TweenService = game:GetService('TweenService')
+local HttpService  = game:GetService('HttpService')
 
--- Tiny helpers to keep instance creation terse -----------------------------
-local function make(class, props, children)
+local rgb = Color3.fromRGB
+local Theme = {
+    Window       = rgb(12, 12, 14),
+    Panel        = rgb(8, 8, 9),
+    Groupbox     = rgb(15, 15, 17),
+    Element      = rgb(22, 22, 25),
+    ElementHover = rgb(31, 31, 35),
+    Border       = rgb(34, 34, 39),
+    BorderLight  = rgb(62, 62, 70),
+    Outline      = rgb(0, 0, 0),
+    Text         = rgb(230, 230, 234),
+    TextDim      = rgb(148, 148, 156),
+    TextMuted    = rgb(88, 88, 96),
+    Accent       = rgb(242, 242, 246),
+    Moon         = rgb(31, 31, 36),
+    Risk         = rgb(255, 96, 96),
+}
+local Prefs = { font = 'Gotham', lowercase = true, animations = true, moon = true }
+
+do
+    local fromLibrary = false
+    pcall(function()
+        local L = getgenv().Library
+        if type(L) == 'table' and L.Version ~= nil and type(L.Theme) == 'table' then
+            for k in pairs(Theme) do
+                if typeof(L.Theme[k]) == 'Color3' then Theme[k] = L.Theme[k] end
+            end
+            if type(L.Prefs) == 'table' then
+                for k, v in pairs(Prefs) do
+                    if type(L.Prefs[k]) == type(v) then Prefs[k] = L.Prefs[k] end
+                end
+            end
+            fromLibrary = true
+        end
+    end)
+    if not fromLibrary then
+        pcall(function()
+            local file = 'Crescent/settings.json'
+            if not (isfile and readfile and isfile(file)) then return end
+            local data = HttpService:JSONDecode(readfile(file))
+            if type(data) ~= 'table' then return end
+            for k, v in pairs(Prefs) do
+                if type(data[k]) == type(v) then Prefs[k] = data[k] end
+            end
+            if type(data.accent) == 'string' then
+                local ok, c = pcall(Color3.fromHex, data.accent)
+                if ok and typeof(c) == 'Color3' then Theme.Accent = c end
+            end
+        end)
+    end
+end
+Theme.AccentDim = Theme.Accent:Lerp(Theme.Element, 0.55)
+
+-- Fonts: the Crescent font family, Regular for body text, Medium for titles.
+local Fonts = {}
+do
+    local FONT_ENUMS = {
+        ['Gotham'] = 'Gotham', ['Builder Sans'] = 'BuilderSans', ['Roboto'] = 'Roboto',
+        ['Source Sans'] = 'SourceSans', ['Ubuntu'] = 'Ubuntu', ['Code'] = 'Code',
+    }
+    local family
+    pcall(function() family = Font.fromEnum(Enum.Font[FONT_ENUMS[Prefs.font] or 'Gotham']).Family end)
+    family = family or 'rbxasset://fonts/families/GothamSSm.json'
+    local function face(weight)
+        local ok, f = pcall(Font.new, family, weight, Enum.FontStyle.Normal)
+        if ok and f then return f end
+        return Font.fromEnum(Enum.Font.Gotham)
+    end
+    Fonts.body = face(Enum.FontWeight.Regular)
+    Fonts.bold = face(Enum.FontWeight.Medium)
+    local ok, mono = pcall(function() return Font.fromEnum(Enum.Font.RobotoMono) end)
+    Fonts.mono = (ok and mono) or Font.fromEnum(Enum.Font.Code)
+end
+
+-- UI labels follow Crescent's lowercase setting. Remote names, paths and
+-- captured code never go through this.
+local function shown(s)
+    s = tostring(s == nil and '' or s)
+    if Prefs.lowercase then return s:lower() end
+    return s
+end
+
+local function tween(inst, t, props)
+    if not Prefs.animations or t <= 0 then
+        for k, v in pairs(props) do inst[k] = v end
+        return
+    end
+    local ok, tw = pcall(TweenService.Create, TweenService, inst,
+        TweenInfo.new(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+    if ok and tw then
+        tw:Play()
+    else
+        for k, v in pairs(props) do inst[k] = v end
+    end
+end
+
+-- One helper creates every instance with Crescent's defaults: no border, body
+-- font at 13, Text colour, see-through text backgrounds, 1px miter strokes.
+local GUI_CLASS  = { Frame = true, ScrollingFrame = true, TextLabel = true, TextButton = true, TextBox = true }
+local TEXT_CLASS = { TextLabel = true, TextButton = true, TextBox = true }
+local function New(class, props)
     local o = Instance.new(class)
-    for k, v in pairs(props or {}) do o[k] = v end
-    for _, c in ipairs(children or {}) do c.Parent = o end
+    if GUI_CLASS[class] then
+        o.BorderSizePixel = 0
+        if TEXT_CLASS[class] then
+            o.BackgroundTransparency = 1
+            o.FontFace = Fonts.body
+            o.TextSize = 13
+            o.TextColor3 = Theme.Text
+            o.Text = ''
+            if class == 'TextBox' then o.ClearTextOnFocus = false end
+        end
+        if class == 'TextButton' then o.AutoButtonColor = false end
+    elseif class == 'UIStroke' then
+        o.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        o.Thickness = 1
+        o.LineJoinMode = Enum.LineJoinMode.Miter
+    end
+    local parent
+    for k, v in pairs(props or {}) do
+        if k == 'Parent' then
+            parent = v
+        elseif k == 'Bold' then
+            if v then o.FontFace = Fonts.bold end
+        else
+            o[k] = v
+        end
+    end
+    if parent then o.Parent = parent end
     return o
 end
-local function corner(r) return make('UICorner', { CornerRadius = UDim.new(0, r or 6) }) end
-local function stroke(c, th) return make('UIStroke', { Color = c or T.stroke, Thickness = th or 1 }) end
-local function pad(px) return make('UIPadding', {
-    PaddingLeft = UDim.new(0, px), PaddingRight = UDim.new(0, px),
-    PaddingTop = UDim.new(0, px), PaddingBottom = UDim.new(0, px),
-}) end
+local function stroke(parent, color)
+    return New('UIStroke', { Color = color or Theme.Border, Parent = parent })
+end
+local function line(parent, pos, size)
+    return New('Frame', { Position = pos, Size = size, BackgroundColor3 = Theme.Border, Parent = parent })
+end
 
 -- ===========================================================================
 -- 3. Value -> code serialisation (the "copy" magic)
@@ -229,245 +346,377 @@ end
 -- ===========================================================================
 -- 4. UI
 -- ===========================================================================
-local gui = make('ScreenGui', {
-    Name = 'RemoteSpy_' .. tostring(math.random(1000, 9999)),
-    ResetOnSpawn = false,
-    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-    DisplayOrder = 9999,
-})
+local W, H     = 720, 460       -- window size
+local HEADER_H = 28             -- Crescent's header height
+local ROW_H    = 32             -- one call in the feed
+
+local gui = Instance.new('ScreenGui')
+gui.Name = 'RemoteSpy_' .. tostring(math.random(1000, 9999))
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.DisplayOrder = 9999
 pcall(function() gui.Parent = hiddenUI or LocalPlayer:WaitForChild('PlayerGui') end)
 pcall(protectGui, gui)
 if not gui.Parent then gui.Parent = LocalPlayer:WaitForChild('PlayerGui') end
 
-local root = make('Frame', {
-    Name = 'Root',
-    Parent = gui,
-    Size = UDim2.fromOffset(720, 460),
+-- Window: an outer frame filled with the border colour, the window 1px inside
+-- it, and a black 1px outline around the lot.
+local root = New('Frame', {
+    Name = 'Root', Parent = gui,
+    Size = UDim2.fromOffset(W, H),
     Position = UDim2.fromScale(0.5, 0.5),
     AnchorPoint = Vector2.new(0.5, 0.5),
-    BackgroundColor3 = T.bg,
-    BorderSizePixel = 0,
-}, { corner(10), stroke(T.stroke, 1) })
-
--- Drop shadow-ish outline glow
-make('UIStroke', { Parent = root, Color = T.accent, Thickness = 1, Transparency = 0.75 })
-
--- --- Title bar ------------------------------------------------------------
-local titleBar = make('Frame', {
-    Name = 'TitleBar', Parent = root,
-    Size = UDim2.new(1, 0, 0, 40),
-    BackgroundColor3 = T.panel, BorderSizePixel = 0,
-}, { corner(10) })
-make('Frame', { Parent = titleBar, Size = UDim2.new(1, 0, 0, 12),
-    Position = UDim2.new(0, 0, 1, -12), BackgroundColor3 = T.panel, BorderSizePixel = 0 })
-
-make('Frame', { Parent = titleBar, Name = 'AccentDot',
-    Size = UDim2.fromOffset(10, 10), Position = UDim2.fromOffset(16, 15),
-    BackgroundColor3 = T.accent, BorderSizePixel = 0 }, { corner(5) })
-
-local titleLabel = make('TextLabel', {
-    Parent = titleBar, BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(36, 0), Size = UDim2.new(1, -160, 1, 0),
-    Font = Enum.Font.GothamBold, Text = 'Remote Spy', TextSize = 15,
-    TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+    BackgroundColor3 = Theme.Border,
+})
+stroke(root, Theme.Outline)
+local winScale = New('UIScale', { Parent = root })   -- for the scale-in on open
+local main = New('Frame', {
+    Name = 'Main', Parent = root,
+    Position = UDim2.fromOffset(1, 1), Size = UDim2.new(1, -2, 1, -2),
+    BackgroundColor3 = Theme.Window, ClipsDescendants = true,
 })
 
-local countLabel = make('TextLabel', {
-    Parent = titleBar, BackgroundTransparency = 1,
-    Position = UDim2.new(0, 120, 0, 0), Size = UDim2.new(1, -250, 1, 0),
-    Font = Enum.Font.Gotham, Text = '0 calls', TextSize = 12,
-    TextColor3 = T.textDim, TextXAlignment = Enum.TextXAlignment.Left,
-})
+local function popIn()
+    if not Prefs.animations then return end
+    winScale.Scale = 0.96
+    tween(winScale, 0.2, { Scale = 1 })
+end
 
-local function titleButton(xOff, colorHover)
-    local b = make('TextButton', {
-        Parent = titleBar, AutoButtonColor = false, Text = '',
-        Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, xOff, 0, 6),
-        BackgroundColor3 = T.panelAlt,
-    }, { corner(6) })
-    b.MouseEnter:Connect(function() b.BackgroundColor3 = colorHover or T.rowHover end)
-    b.MouseLeave:Connect(function() b.BackgroundColor3 = T.panelAlt end)
+-- Crescent moon: a circle with a background-coloured circle over its upper
+-- right. Frames only, no image asset.
+local function crescent(parent, moonColor, cutColor)
+    local moon = New('Frame', { AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = moonColor, Parent = parent })
+    New('UICorner', { CornerRadius = UDim.new(1, 0), Parent = moon })
+    local cut = New('Frame', {
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5 + 0.28, 0.5 - 0.29),
+        Size = UDim2.fromScale(1.03, 1.03), BackgroundColor3 = cutColor, Parent = moon,
+    })
+    New('UICorner', { CornerRadius = UDim.new(1, 0), Parent = cut })
+    return moon
+end
+
+-- The big dim moon Crescent draws behind its content (off with its "moon"
+-- setting). `parent` must clip and be Panel-coloured.
+local function moonBehind(parent)
+    if not Prefs.moon then return end
+    local moonBox = New('Frame', {
+        Parent = parent, BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(0.6, 0.6),
+    })
+    New('UIAspectRatioConstraint', { Parent = moonBox, AspectRatio = 1 })
+    local moon = crescent(moonBox, Theme.Moon, Theme.Panel)
+    moon.Size = UDim2.fromScale(1, 1)
+    moon.Position = UDim2.fromScale(0.5825, 0.4125)
+    New('UIGradient', { Parent = moon, Rotation = 35, Color = ColorSequence.new(Color3.new(1, 1, 1), rgb(130, 130, 140)) })
+end
+
+-- Groupbox: see-through box with 1px borders; the title breaks the top line.
+-- Returns the box and the padded content frame inside it.
+local function groupbox(parent, title, props)
+    props.Parent = parent
+    props.BackgroundColor3 = Theme.Groupbox
+    props.BackgroundTransparency = 0.3
+    local box = New('Frame', props)
+    line(box, UDim2.new(), UDim2.new(0, 1, 1, 0))                       -- left
+    line(box, UDim2.new(1, -1, 0, 0), UDim2.new(0, 1, 1, 0))            -- right
+    line(box, UDim2.new(0, 0, 1, -1), UDim2.new(1, 0, 0, 1))            -- bottom
+    line(box, UDim2.new(), UDim2.fromOffset(6, 1))                      -- top, before the title
+    local topRight = line(box, UDim2.new(), UDim2.new(1, 0, 0, 1))      -- top, after the title
+    local label = New('TextLabel', {
+        Parent = box, Position = UDim2.fromOffset(9, -7), Size = UDim2.fromOffset(0, 14),
+        AutomaticSize = Enum.AutomaticSize.X, Bold = true, Text = shown(title),
+    })
+    local function fit()
+        local w = label.AbsoluteSize.X / math.max(winScale.Scale, 0.01)
+        local x = math.floor(9 + w + 5 + 0.5)
+        topRight.Position = UDim2.fromOffset(x, 0)
+        topRight.Size = UDim2.new(1, -x, 0, 1)
+    end
+    label:GetPropertyChangedSignal('AbsoluteSize'):Connect(fit)
+    fit()
+    local content = New('Frame', {
+        Parent = box, BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(8, 14), Size = UDim2.new(1, -16, 1, -22),
+    })
+    return box, content
+end
+
+-- Button: Element box, Border stroke; hover lightens both, a click flashes the
+-- stroke to the accent. An "active" button (pause while paused) keeps an
+-- accent stroke.
+local Buttons = {}
+local function button(parent, text, order, size)
+    local b = New('TextButton', {
+        Parent = parent, LayoutOrder = order, Size = size,
+        BackgroundTransparency = 0, BackgroundColor3 = Theme.Element,
+        Text = shown(text), TextTruncate = Enum.TextTruncate.AtEnd,
+    })
+    local st = stroke(b)
+    New('UIPadding', { Parent = b, PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5) })
+    local s = { hover = false, active = false }
+    local function rest()
+        return s.active and Theme.AccentDim or (s.hover and Theme.BorderLight or Theme.Border)
+    end
+    function s.paint(t)
+        tween(b, t or 0.15, {
+            BackgroundColor3 = s.hover and Theme.ElementHover or Theme.Element,
+            TextColor3 = s.active and Theme.Accent or Theme.Text,
+        })
+        tween(st, t or 0.2, { Color = rest() })
+    end
+    b.MouseEnter:Connect(function() s.hover = true; s.paint() end)
+    b.MouseLeave:Connect(function() s.hover = false; s.paint() end)
+    b.MouseButton1Click:Connect(function()
+        st.Color = Theme.Accent
+        tween(st, 0.4, { Color = rest() })
+    end)
+    Buttons[b] = s
     return b
 end
-
--- Icons drawn from Frames so they never depend on emoji font support.
-local function iconBar(parent, w, h, offx, offy, rot)
-    return make('Frame', {
-        Parent = parent, AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.new(0.5, offx or 0, 0.5, offy or 0),
-        Size = UDim2.fromOffset(w, h), Rotation = rot or 0,
-        BackgroundColor3 = T.text, BorderSizePixel = 0,
-    }, { corner(1) })
+local function setButtonActive(b, on)
+    local s = Buttons[b]
+    if s then s.active = on; s.paint() end
 end
 
-local settingsBtn = titleButton(-104)                      -- three-line menu
-iconBar(settingsBtn, 14, 2, 0, -5)
-iconBar(settingsBtn, 14, 2, 0, 0)
-iconBar(settingsBtn, 14, 2, 0, 5)
-
-local minBtn = titleButton(-70)                            -- single line
-iconBar(minBtn, 12, 2, 0, 5)
-
-local closeBtn = titleButton(-36, T.danger)                -- X
-iconBar(closeBtn, 14, 2, 0, 0, 45)
-iconBar(closeBtn, 14, 2, 0, 0, -45)
-
--- --- Body split -----------------------------------------------------------
-local body = make('Frame', {
-    Name = 'Body', Parent = root,
-    Position = UDim2.fromOffset(0, 40), Size = UDim2.new(1, 0, 1, -40),
-    BackgroundTransparency = 1,
-}, { pad(10) })
-make('UIListLayout', { Parent = body, FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder })
-
--- LEFT column: search + toolbar + feed --------------------------------------
-local left = make('Frame', {
-    Name = 'Left', Parent = body, LayoutOrder = 1,
-    Size = UDim2.new(0.42, 0, 1, 0), BackgroundTransparency = 1,
-})
-make('UIListLayout', { Parent = left, Padding = UDim.new(0, 8),
-    SortOrder = Enum.SortOrder.LayoutOrder })
-
-local searchBox = make('TextBox', {
-    Parent = left, LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 30),
-    BackgroundColor3 = T.panel, BorderSizePixel = 0,
-    Font = Enum.Font.Gotham, PlaceholderText = 'filter by name...',
-    Text = '', TextSize = 13, TextColor3 = T.text,
-    PlaceholderColor3 = T.textDim, ClearTextOnFocus = false,
-    TextXAlignment = Enum.TextXAlignment.Left,
-}, { corner(6), stroke(), pad(8) })
-
-local toolbar = make('Frame', {
-    Parent = left, LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 28),
-    BackgroundTransparency = 1,
-})
-make('UIListLayout', { Parent = toolbar, FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder })
-
-local function toolButton(text, order)
-    local b = make('TextButton', {
-        Parent = toolbar, LayoutOrder = order, AutoButtonColor = false,
-        Size = UDim2.new(1/3, -4, 1, 0), BackgroundColor3 = T.panel,
-        Font = Enum.Font.GothamMedium, Text = text, TextSize = 12, TextColor3 = T.text,
-    }, { corner(6), stroke() })
-    b.MouseEnter:Connect(function() b.BackgroundColor3 = T.rowHover end)
-    b.MouseLeave:Connect(function() b.BackgroundColor3 = T.panel end)
-    return b
+-- Text input: Element box, muted placeholder, accent stroke while typing.
+local function input(parent, order, placeholder)
+    local frame = New('Frame', {
+        Parent = parent, LayoutOrder = order, Size = UDim2.new(1, 0, 0, 20),
+        BackgroundColor3 = Theme.Element, ClipsDescendants = true,
+    })
+    local st = stroke(frame)
+    local box = New('TextBox', {
+        Parent = frame, Position = UDim2.fromOffset(7, 0), Size = UDim2.new(1, -14, 1, 0),
+        PlaceholderText = placeholder, PlaceholderColor3 = Theme.TextMuted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    })
+    local hover, focused = false, false
+    local function paint()
+        tween(st, 0.15, { Color = focused and Theme.AccentDim or (hover and Theme.BorderLight or Theme.Border) })
+    end
+    frame.MouseEnter:Connect(function() hover = true; paint() end)
+    frame.MouseLeave:Connect(function() hover = false; paint() end)
+    box.Focused:Connect(function() focused = true; paint() end)
+    box.FocusLost:Connect(function() focused = false; paint() end)
+    return box
 end
-local pauseBtn   = toolButton('Pause', 1)
-local clearBtn   = toolButton('Clear', 2)
-local copyAllBtn = toolButton('Copy All', 3) -- copy the deduped dump (also on disk)
 
-local feed = make('ScrollingFrame', {
+local function hlist(parent, gap)
+    return New('UIListLayout', {
+        Parent = parent, FillDirection = Enum.FillDirection.Horizontal,
+        Padding = UDim.new(0, gap), SortOrder = Enum.SortOrder.LayoutOrder,
+    })
+end
+local function vlist(parent, gap)
+    return New('UIListLayout', { Parent = parent, Padding = UDim.new(0, gap), SortOrder = Enum.SortOrder.LayoutOrder })
+end
+
+-- --- Header ---------------------------------------------------------------
+local titleBar = New('Frame', {      -- opaque (same colour as the window) like the old bar: it is the drag handle
+    Name = 'TitleBar', Parent = main,
+    Size = UDim2.new(1, 0, 0, HEADER_H), BackgroundColor3 = Theme.Window,
+})
+
+local logo = crescent(titleBar, Theme.Accent, Theme.Window)
+logo.Position = UDim2.fromOffset(17, 15)
+logo.Size = UDim2.fromOffset(11, 11)
+
+local titleRow = New('Frame', {
+    Parent = titleBar, BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(30, 1), Size = UDim2.new(1, -110, 1, 0),
+})
+New('UIListLayout', {
+    Parent = titleRow, FillDirection = Enum.FillDirection.Horizontal,
+    VerticalAlignment = Enum.VerticalAlignment.Center,
+    Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder,
+})
+local titleLabel = New('TextLabel', {
+    Parent = titleRow, LayoutOrder = 1, Size = UDim2.new(0, 0, 1, 0),
+    AutomaticSize = Enum.AutomaticSize.X, Bold = true,
+    Text = shown('Remote Spy'), TextColor3 = Theme.TextDim,
+})
+local countLabel = New('TextLabel', {
+    Parent = titleRow, LayoutOrder = 2, Size = UDim2.new(0, 0, 1, 0),
+    AutomaticSize = Enum.AutomaticSize.X, TextSize = 12,
+    Text = '0 calls', TextColor3 = Theme.TextMuted,
+})
+
+-- Header controls: small Element boxes, right to left. Icons are 1px frames or
+-- an ASCII glyph (never images); they brighten on hover.
+local function headerButton(slot, hoverInk)
+    local b = New('TextButton', {
+        Parent = titleBar, AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -10 - (slot - 1) * 22, 0.5, 1), Size = UDim2.fromOffset(18, 18),
+        BackgroundTransparency = 0, BackgroundColor3 = Theme.Element,
+    })
+    local st = stroke(b)
+    local ink = {}   -- { instance, colour property }
+    local hover = false
+    local function paint()
+        tween(b, 0.15, { BackgroundColor3 = hover and Theme.ElementHover or Theme.Element })
+        tween(st, 0.2, { Color = hover and Theme.BorderLight or Theme.Border })
+        for _, i in ipairs(ink) do
+            tween(i[1], 0.15, { [i[2]] = hover and (hoverInk or Theme.Text) or Theme.TextDim })
+        end
+    end
+    b.MouseEnter:Connect(function() hover = true; paint() end)
+    b.MouseLeave:Connect(function() hover = false; paint() end)
+    b.MouseButton1Click:Connect(function()
+        st.Color = Theme.Accent
+        tween(st, 0.4, { Color = hover and Theme.BorderLight or Theme.Border })
+    end)
+    local icon = {}
+    function icon.bar(w, y)      -- a 1px line, centred, y px off the middle
+        local f = New('Frame', {
+            Parent = b, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, y),
+            Size = UDim2.fromOffset(w, 1), BackgroundColor3 = Theme.TextDim,
+        })
+        ink[#ink + 1] = { f, 'BackgroundColor3' }
+    end
+    function icon.glyph(text)
+        local l = New('TextLabel', {
+            Parent = b, Position = UDim2.fromOffset(0, -1), Size = UDim2.fromScale(1, 1),
+            Text = text, TextColor3 = Theme.TextDim,
+        })
+        ink[#ink + 1] = { l, 'TextColor3' }
+    end
+    return b, icon
+end
+
+local closeBtn, closeIcon = headerButton(1, Theme.Risk)        -- x
+closeIcon.glyph('x')
+local minBtn, minIcon = headerButton(2)                        -- single line
+minIcon.bar(8, 0)
+local settingsBtn, menuIcon = headerButton(3)                  -- three lines
+menuIcon.bar(8, -3)
+menuIcon.bar(8, 0)
+menuIcon.bar(8, 3)
+
+-- --- Body: the dark panel, with the moon behind the two boxes ----------------
+local body = New('Frame', {
+    Name = 'Body', Parent = main,
+    Position = UDim2.fromOffset(10, HEADER_H), Size = UDim2.new(1, -20, 1, -(HEADER_H + 10)),
+    BackgroundColor3 = Theme.Panel, ClipsDescendants = true,
+})
+stroke(body)
+moonBehind(body)
+
+-- LEFT box: filter + toolbar + feed ------------------------------------------
+local _, left = groupbox(body, 'Calls', {
+    Position = UDim2.fromOffset(8, 12), Size = UDim2.new(0.42, -12, 1, -20),
+})
+vlist(left, 6)
+
+local searchBox = input(left, 1, shown('Filter by name'))
+
+local toolbar = New('Frame', {
+    Parent = left, LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+})
+hlist(toolbar, 6)
+local pauseBtn   = button(toolbar, 'Pause', 1, UDim2.new(1/3, -4, 1, 0))
+local clearBtn   = button(toolbar, 'Clear', 2, UDim2.new(1/3, -4, 1, 0))
+local copyAllBtn = button(toolbar, 'Copy all', 3, UDim2.new(1/3, -4, 1, 0)) -- copy the deduped dump (also on disk)
+
+local feed = New('ScrollingFrame', {
     Name = 'Feed', Parent = left, LayoutOrder = 3,
-    Size = UDim2.new(1, 0, 1, -74), BackgroundColor3 = T.panel, BorderSizePixel = 0,
-    ScrollBarThickness = 4, ScrollBarImageColor3 = T.accent,
+    Size = UDim2.new(1, 0, 1, -52), BackgroundColor3 = Theme.Panel, BackgroundTransparency = 0.5,
+    ScrollBarThickness = 2, ScrollBarImageColor3 = Theme.TextMuted,
     CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
     ScrollingDirection = Enum.ScrollingDirection.Y,
-}, { corner(8), stroke(), pad(6) })
-make('UIListLayout', { Parent = feed, Padding = UDim.new(0, 4),
-    SortOrder = Enum.SortOrder.LayoutOrder })
+})
+stroke(feed)
+vlist(feed, 1)
 
--- RIGHT column: detail view -------------------------------------------------
-local right = make('Frame', {
-    Name = 'Right', Parent = body, LayoutOrder = 2,
-    Size = UDim2.new(0.58, -10, 1, 0), BackgroundColor3 = T.panel, BorderSizePixel = 0,
-}, { corner(8), stroke(), pad(12) })
-make('UIListLayout', { Parent = right, Padding = UDim.new(0, 8),
-    SortOrder = Enum.SortOrder.LayoutOrder })
+-- RIGHT box: detail view -------------------------------------------------------
+local _, right = groupbox(body, 'Details', {
+    Position = UDim2.new(0.42, 4, 0, 12), Size = UDim2.new(0.58, -12, 1, -20),
+})
+vlist(right, 6)
 
-local detailName = make('TextLabel', {
-    Parent = right, LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 22),
-    BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-    Text = 'Select a call', TextSize = 15, TextColor3 = T.text,
+local detailName = New('TextLabel', {
+    Parent = right, LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 18), Bold = true,
+    Text = shown('Select a call'), TextColor3 = Theme.TextDim,
     TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
 })
-local detailPath = make('TextLabel', {
-    Parent = right, LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 16),
-    BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-    Text = '', TextSize = 12, TextColor3 = T.textDim,
+local detailPath = New('TextLabel', {
+    Parent = right, LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 14),
+    Text = '', TextSize = 12, TextColor3 = Theme.TextDim,
     TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
 })
 
-local codeBox = make('ScrollingFrame', {
-    Parent = right, LayoutOrder = 3, Size = UDim2.new(1, 0, 1, -84),
-    BackgroundColor3 = T.bg, BorderSizePixel = 0,
-    ScrollBarThickness = 4, ScrollBarImageColor3 = T.accent,
+local codeBox = New('ScrollingFrame', {
+    Parent = right, LayoutOrder = 3, Size = UDim2.new(1, 0, 1, -70),
+    BackgroundColor3 = Theme.Panel, BackgroundTransparency = 0.5,
+    ScrollBarThickness = 2, ScrollBarImageColor3 = Theme.TextMuted,
     CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-}, { corner(6), stroke(), pad(10) })
-local codeLabel = make('TextLabel', {
-    Parent = codeBox, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0),
-    AutomaticSize = Enum.AutomaticSize.Y, Font = Enum.Font.Code,
-    Text = '-- captured call source will appear here', TextSize = 13,
-    TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
+    ScrollingDirection = Enum.ScrollingDirection.Y,
+})
+stroke(codeBox)
+New('UIPadding', {
+    Parent = codeBox, PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+    PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
+})
+local codeLabel = New('TextLabel', {
+    Parent = codeBox, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    FontFace = Fonts.mono, TextSize = 12,
+    Text = '-- captured call source will appear here', TextColor3 = Theme.TextMuted,
+    TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+    TextWrapped = true,
 })
 
-local detailBtns = make('Frame', {
-    Parent = right, LayoutOrder = 4, Size = UDim2.new(1, 0, 0, 30),
-    BackgroundTransparency = 1,
+local detailBtns = New('Frame', {
+    Parent = right, LayoutOrder = 4, Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
 })
-make('UIListLayout', { Parent = detailBtns, FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder })
+hlist(detailBtns, 6)
+local copyCodeBtn = button(detailBtns, 'Copy script', 1, UDim2.new(0.4, -4, 1, 0))
+local copyPathBtn = button(detailBtns, 'Copy path', 2, UDim2.new(0.3, -4, 1, 0))
+local ignoreBtn   = button(detailBtns, 'Ignore remote', 3, UDim2.new(0.3, -4, 1, 0))
 
-local function detailButton(text, order, w, color)
-    local b = make('TextButton', {
-        Parent = detailBtns, LayoutOrder = order, AutoButtonColor = false,
-        Size = UDim2.new(w, order == 1 and -0 or -4, 1, 0),
-        BackgroundColor3 = color or T.panelAlt,
-        Font = Enum.Font.GothamMedium, Text = text, TextSize = 12,
-        TextColor3 = order == 1 and Color3.new(1, 1, 1) or T.text,
-    }, { corner(6) })
-    b.MouseEnter:Connect(function() b.BackgroundTransparency = 0.15 end)
-    b.MouseLeave:Connect(function() b.BackgroundTransparency = 0 end)
-    return b
+-- ---- Settings overlay (the menu button opens this) --------------------------
+local settingsPanel = New('Frame', {
+    Name = 'Settings', Parent = main, Visible = false, ZIndex = 2,
+    Position = body.Position, Size = body.Size, BackgroundColor3 = Theme.Panel,
+    ClipsDescendants = true,
+})
+stroke(settingsPanel)
+moonBehind(settingsPanel)
+
+local _, sCard = groupbox(settingsPanel, 'Settings', {
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+    Size = UDim2.fromOffset(300, 90),
+})
+vlist(sCard, 6)
+
+New('TextLabel', {
+    Parent = sCard, LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 16),
+    Text = shown('Open / close key'), TextColor3 = Theme.TextDim,
+    TextXAlignment = Enum.TextXAlignment.Left,
+})
+
+local keyRow = New('Frame', {
+    Parent = sCard, LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+})
+local keyBox = New('Frame', {
+    Parent = keyRow, Size = UDim2.new(1, -86, 1, 0), BackgroundColor3 = Theme.Element,
+})
+local keyStroke = stroke(keyBox)
+local keyValueLabel = New('TextLabel', {
+    Parent = keyBox, Position = UDim2.fromOffset(7, 0), Size = UDim2.new(1, -14, 1, 0),
+    Text = shown(TOGGLE_KEY.Name), TextColor3 = Theme.TextDim,
+    TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+})
+local rebindBtn = button(keyRow, 'Rebind', 1, UDim2.fromOffset(80, 20))
+rebindBtn.AnchorPoint = Vector2.new(1, 0)
+rebindBtn.Position = UDim2.new(1, 0, 0, 0)
+
+local doneBtn = button(sCard, 'Done', 3, UDim2.new(1, 0, 0, 20))
+
+-- Key box look: dim while idle, accent while waiting for a key (Crescent's
+-- key picker does the same).
+local function paintKey(waiting)
+    tween(keyValueLabel, 0.12, { TextColor3 = waiting and Theme.Accent or Theme.TextDim })
+    tween(keyStroke, 0.12, { Color = waiting and Theme.AccentDim or Theme.Border })
 end
-local copyCodeBtn = detailButton('Copy Script', 1, 0.4, T.accent)
-local copyPathBtn = detailButton('Copy Path', 2, 0.3)
-local ignoreBtn   = detailButton('Ignore Remote', 3, 0.3)
-
--- ---- Settings overlay (top-right gear opens this) ------------------------
-local settingsPanel = make('Frame', {
-    Name = 'Settings', Parent = root, Visible = false,
-    Position = UDim2.fromOffset(0, 40), Size = UDim2.new(1, 0, 1, -40),
-    BackgroundColor3 = T.bg, BorderSizePixel = 0,
-}, { corner(10) })
-
-local sCard = make('Frame', {
-    Parent = settingsPanel, AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(380, 200),
-    BackgroundColor3 = T.panel, BorderSizePixel = 0,
-}, { corner(12), stroke(), pad(18) })
-make('UIListLayout', { Parent = sCard, Padding = UDim.new(0, 12),
-    SortOrder = Enum.SortOrder.LayoutOrder })
-
-make('TextLabel', { Parent = sCard, LayoutOrder = 1, BackgroundTransparency = 1,
-    Size = UDim2.new(1, 0, 0, 22), Font = Enum.Font.GothamBold, Text = 'Settings',
-    TextSize = 16, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left })
-make('TextLabel', { Parent = sCard, LayoutOrder = 2, BackgroundTransparency = 1,
-    Size = UDim2.new(1, 0, 0, 16), Font = Enum.Font.Gotham, Text = 'Open / close key',
-    TextSize = 13, TextColor3 = T.textDim, TextXAlignment = Enum.TextXAlignment.Left })
-
-local keyRow = make('Frame', { Parent = sCard, LayoutOrder = 3,
-    Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = T.bg, BorderSizePixel = 0,
-}, { corner(8), stroke() })
-local keyValueLabel = make('TextLabel', { Parent = keyRow, BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -120, 1, 0),
-    Font = Enum.Font.GothamMedium, Text = TOGGLE_KEY.Name, TextSize = 14,
-    TextColor3 = T.accent, TextXAlignment = Enum.TextXAlignment.Left })
-local rebindBtn = make('TextButton', { Parent = keyRow, AutoButtonColor = false,
-    AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0),
-    Size = UDim2.fromOffset(96, 26), BackgroundColor3 = T.accent,
-    Font = Enum.Font.GothamMedium, Text = 'Rebind', TextSize = 13,
-    TextColor3 = Color3.new(1, 1, 1) }, { corner(6) })
-
-local doneBtn = make('TextButton', { Parent = sCard, LayoutOrder = 4,
-    Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = T.panelAlt, AutoButtonColor = false,
-    Font = Enum.Font.GothamMedium, Text = 'Done', TextSize = 13, TextColor3 = T.text,
-}, { corner(8) })
-doneBtn.MouseEnter:Connect(function() doneBtn.BackgroundColor3 = T.rowHover end)
-doneBtn.MouseLeave:Connect(function() doneBtn.BackgroundColor3 = T.panelAlt end)
 
 -- ===========================================================================
 -- 5. State + row rendering
@@ -483,23 +732,26 @@ local queue    = {}        -- captures waiting to be turned into rows
 
 local function flashButton(btn, okText)
     local prev = btn.Text
-    btn.Text = okText
+    btn.Text = shown(okText)
     task.delay(0.8, function() if btn and btn.Parent then btn.Text = prev end end)
 end
 
 local function renderDetail(entry)
     selected = entry
     if not entry then
-        detailName.Text = 'Select a call'
+        detailName.Text = shown('Select a call')
+        detailName.TextColor3 = Theme.TextDim
         detailPath.Text = ''
         codeLabel.Text  = '-- captured call source will appear here'
+        codeLabel.TextColor3 = Theme.TextMuted
         return
     end
     detailName.Text = string.format('%s  ·  %s', entry.name, entry.method)
-    detailName.TextColor3 = entry.method == 'InvokeServer' and T.accent2 or T.accent
+    detailName.TextColor3 = Theme.Text
     local ok, full = pcall(function() return entry.remote:GetFullName() end)
     detailPath.Text = ok and full or '<remote destroyed>'
     codeLabel.Text  = buildSnippet(entry)
+    codeLabel.TextColor3 = Theme.Text
 end
 
 local function passesFilter(entry)
@@ -507,46 +759,48 @@ local function passesFilter(entry)
     return entry.name:lower():find(filter, 1, true) ~= nil
 end
 
+-- One call in the feed, styled like a Crescent dropdown row: Element background,
+-- lighter on hover; the selected row gets the accent bar and full-white name.
 local function makeRow(entry)
-    local isInvoke = entry.method == 'InvokeServer'
-    local row = make('TextButton', {
-        Parent = feed, AutoButtonColor = false, Text = '',
-        Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = T.row, BorderSizePixel = 0,
+    local row = New('TextButton', {
+        Parent = feed, Size = UDim2.new(1, 0, 0, ROW_H),
+        BackgroundTransparency = 0, BackgroundColor3 = Theme.Element,
         LayoutOrder = entry.id,
-    }, { corner(6) })
+    })
 
-    make('Frame', { Parent = row, Size = UDim2.fromOffset(3, 30),
-        Position = UDim2.fromOffset(6, 6), BorderSizePixel = 0,
-        BackgroundColor3 = isInvoke and T.accent2 or T.accent }, { corner(2) })
+    local bar = New('Frame', { Parent = row, Visible = false,
+        Position = UDim2.fromOffset(0, 4), Size = UDim2.fromOffset(2, ROW_H - 8),
+        BackgroundColor3 = Theme.Accent })
 
-    make('TextLabel', { Parent = row, BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(16, 4), Size = UDim2.new(1, -60, 0, 18),
-        Font = Enum.Font.GothamMedium, Text = entry.name, TextSize = 13,
-        TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd })
+    local nameLabel = New('TextLabel', { Parent = row,
+        Position = UDim2.fromOffset(10, 3), Size = UDim2.new(1, -58, 0, 15),
+        Text = entry.name, TextColor3 = Theme.TextDim,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd })
 
-    make('TextLabel', { Parent = row, BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(16, 22), Size = UDim2.new(1, -60, 0, 14),
-        Font = Enum.Font.Gotham,
+    New('TextLabel', { Parent = row,
+        Position = UDim2.fromOffset(10, 17), Size = UDim2.new(1, -58, 0, 12),
         Text = string.format('%s · %d arg%s', entry.method, entry.argc,
             entry.argc == 1 and '' or 's'),
-        TextSize = 11, TextColor3 = T.textDim,
-        TextXAlignment = Enum.TextXAlignment.Left })
+        TextSize = 12, TextColor3 = Theme.TextMuted,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd })
 
-    make('TextLabel', { Parent = row, BackgroundTransparency = 1,
-        Position = UDim2.new(1, -50, 0, 0), Size = UDim2.fromOffset(44, 42),
-        Font = Enum.Font.GothamBold, Text = '#' .. entry.id, TextSize = 11,
-        TextColor3 = T.textDim, TextXAlignment = Enum.TextXAlignment.Right })
+    New('TextLabel', { Parent = row,
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 0), Size = UDim2.fromOffset(44, ROW_H),
+        Text = '#' .. entry.id, TextSize = 12,
+        TextColor3 = Theme.TextMuted, TextXAlignment = Enum.TextXAlignment.Right })
 
     local function refreshColor()
-        row.BackgroundColor3 = (selected == entry) and T.rowSelect or T.row
+        local on = selected == entry
+        bar.Visible = on
+        tween(nameLabel, 0.15, { TextColor3 = on and Theme.Text or Theme.TextDim })
     end
-    row.MouseEnter:Connect(function() if selected ~= entry then row.BackgroundColor3 = T.rowHover end end)
-    row.MouseLeave:Connect(refreshColor)
+    refreshColor()
+    row.MouseEnter:Connect(function() tween(row, 0.12, { BackgroundColor3 = Theme.ElementHover }) end)
+    row.MouseLeave:Connect(function() tween(row, 0.18, { BackgroundColor3 = Theme.Element }) end)
     row.MouseButton1Click:Connect(function()
         renderDetail(entry)
-        for e, r in pairs(rowByEntry) do
-            r.BackgroundColor3 = (e == entry) and T.rowSelect or T.row
+        for e in pairs(rowByEntry) do
+            if e._refreshColor then e._refreshColor() end
         end
     end)
 
@@ -584,8 +838,8 @@ end)
 
 pauseBtn.MouseButton1Click:Connect(function()
     paused = not paused
-    pauseBtn.Text = paused and 'Resume' or 'Pause'
-    pauseBtn.TextColor3 = paused and T.accent2 or T.text
+    pauseBtn.Text = shown(paused and 'Resume' or 'Pause')
+    setButtonActive(pauseBtn, paused)
 end)
 
 clearBtn.MouseButton1Click:Connect(function()
@@ -650,7 +904,7 @@ minBtn.MouseButton1Click:Connect(function()
     minimised = not minimised
     body.Visible = not minimised
     settingsPanel.Visible = false
-    root.Size = minimised and UDim2.fromOffset(720, 40) or UDim2.fromOffset(720, 460)
+    tween(root, 0.2, { Size = minimised and UDim2.fromOffset(W, HEADER_H + 2) or UDim2.fromOffset(W, H) })
 end)
 
 -- Settings + open/close key rebind
@@ -661,23 +915,26 @@ end)
 doneBtn.MouseButton1Click:Connect(function()
     settingsPanel.Visible = false
     awaitingKey = false
-    keyValueLabel.Text = TOGGLE_KEY.Name
-    keyValueLabel.TextColor3 = T.accent
+    keyValueLabel.Text = shown(TOGGLE_KEY.Name)
+    paintKey(false)
 end)
 rebindBtn.MouseButton1Click:Connect(function()
     awaitingKey = true
-    keyValueLabel.Text = 'Press any key...'
-    keyValueLabel.TextColor3 = T.accent2
+    keyValueLabel.Text = shown('Press any key...')
+    paintKey(true)
 end)
 
-local function setVisible(v) root.Visible = v end
+local function setVisible(v)
+    root.Visible = v
+    if v then popIn() end
+end
 UIS.InputBegan:Connect(function(i, gpe)
     -- Capture the next key press when rebinding (ignore mouse buttons)
     if awaitingKey and i.UserInputType == Enum.UserInputType.Keyboard then
         TOGGLE_KEY = i.KeyCode
         saveToggleKey()                    -- persist across executions
-        keyValueLabel.Text = TOGGLE_KEY.Name
-        keyValueLabel.TextColor3 = T.accent
+        keyValueLabel.Text = shown(TOGGLE_KEY.Name)
+        paintKey(false)
         awaitingKey = false
         return
     end
@@ -814,6 +1071,7 @@ getgenv().RemoteSpy_Unload = unload
 -- 10. Intro toast
 -- ===========================================================================
 countLabel.Text = '0 calls'
-titleLabel.Text = 'Remote Spy'
+titleLabel.Text = shown('Remote Spy')
+popIn()
 warn(('[RemoteSpy] Loaded. Toggle with %s. Fire some remotes in-game to populate the feed.')
     :format(TOGGLE_KEY.Name))

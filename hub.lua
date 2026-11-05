@@ -24,11 +24,37 @@ repeat task.wait() until game:GetService('Players').LocalPlayer
     and game:GetService('Players').LocalPlayer:FindFirstChildOfClass('PlayerGui')
 
 -- 1. Load the library + addons -------------------------------------------------
-local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
-
-local Library      = loadstring(game:HttpGet(repo .. 'Library.lua'))()
-local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
-local SaveManager  = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+-- Menu library: Crescent (our own look, same function names as LinoriaLib) when
+-- getgenv().HubUI == 'crescent' is set before running, LinoriaLib otherwise. If
+-- Crescent fails to load, the hub falls back to LinoriaLib so the menu always opens.
+local Library, ThemeManager, SaveManager
+do
+    local function loadFrom(base)
+        local lib = loadstring(game:HttpGet(base .. 'Library.lua'))()
+        local tm = loadstring(game:HttpGet(base .. 'addons/ThemeManager.lua'))()
+        local sm = loadstring(game:HttpGet(base .. 'addons/SaveManager.lua'))()
+        return lib, tm, sm
+    end
+    if getgenv().HubUI == 'crescent' then
+        -- newest push, past raw GitHub's 5-minute cache of 'main'
+        local repo = 'zambiiezz123/test'
+        local okRef, ref = pcall(function()
+            return (game:HttpGet('https://github.com/' .. repo .. '.git/info/refs?service=git-upload-pack'):match('(%x+) refs/heads/main') or ''):sub(-40)
+        end)
+        if not okRef or type(ref) ~= 'string' or #ref ~= 40 then ref = 'main' end
+        local ok, a, b, c = pcall(loadFrom, 'https://raw.githubusercontent.com/' .. repo .. '/' .. ref .. '/crescent/')
+        if ok and type(a) == 'table' and type(b) == 'table' and type(c) == 'table' then
+            Library, ThemeManager, SaveManager = a, b, c
+        else
+            warn('[Hub] Crescent did not load, using LinoriaLib instead: ' .. tostring(a))
+            local stray = getgenv().Library
+            if type(stray) == 'table' and stray.Version and not stray.Unloaded then pcall(stray.Unload, stray) end
+        end
+    end
+    if not Library then
+        Library, ThemeManager, SaveManager = loadFrom('https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/')
+    end
+end
 
 -- Expose an unload hook so the NEXT injection can clean us up.
 getgenv().GameTestMenu_Unload = function() Library:Unload() end

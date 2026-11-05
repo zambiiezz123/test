@@ -7745,6 +7745,652 @@ if HUB_CURRENT ~= 'roguecopy' then
             end)()
         end)()
 
+        -- ===== Players: court read (shot readout, coverage %, stamina bars) ===
+        -- From the decompiled client:
+        --  * Stamina is an instance attribute on every character model:
+        --    GetAttribute('Stamina') 0..100 and 'MaxStamina' (the fatigue cap). The game
+        --    reads other players' stamina itself (Captain panel, sweat under 30).
+        --  * Other players' HumanoidRootPart is anchored and moved to an interpolated
+        --    CFrame every frame (Controllers/Replication.lua), so it is the smooth part.
+        --  * Team 1 / 2 (0 = none); opponent = other.Team ~= mine or mine == 0. Goal =
+        --    the Goal part of the hoop that player attacks. Basketball = has the ball.
+        --  * Contest is worked out only on the server. It arrives after the shot as
+        --    InterfaceService.ShowFeedback(char, contest 0..100, grade). The numbers
+        --    before a shot are our estimate from distance + angle; the readout puts the
+        --    real one next to it after every shot. The game colours contest green at 0,
+        --    yellow at 20, red from 40 (ShotFeedback.lua), and so does this.
+        --  * Steal = InputService.Steal:FireServer() with nothing else; the client checks
+        --    nothing and the server decides (range, chance, fouls). The game's own badge
+        --    text says dribble moves are when the ball can be poked free; a character's
+        --    Action is "Dribbling" during one and its Hand attribute ("L"/"R") says which
+        --    side the ball is on. A steal that works hands you the ball.
+        --  * Shots: every scripted stage is an exact ballistic arc under workspace.Gravity
+        --    (Shared/Config/Game/Basketball.lua ApplyVelocity); after the last stage the
+        --    ball is plain physics. Our copy of the ball is moved 50x/s from the server's
+        --    snapshots, so its rendered positions are fitted to an arc and stepped forward
+        --    with a ball-sized cast that bounces off the rim / backboard until it lands.
+        ;(function()
+            local StealBox = Tabs.Players:AddLeftGroupbox('Auto Steal')
+            StealBox:AddLabel('Presses steal for you when an opponent with the ball is in reach in front of you. The server decides if it works, and reaching in too often can draw fouls.', true)
+            local StealStatus = StealBox:AddLabel('Idle', true)
+            StealBox:AddToggle('PBAutoSteal', { Text = 'Auto steal', Default = false,
+                Tooltip = 'Only fires while you do not have the ball and are free to act, once per wait (below).' })
+                :AddKeyPicker('PBAutoStealKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Auto steal' })
+            StealBox:AddSlider('PBStealRange', { Text = 'Reach', Default = 5, Min = 2, Max = 9, Rounding = 1, Suffix = ' studs' })
+            StealBox:AddToggle('PBStealMoves', { Text = 'Only during dribble moves', Default = true,
+                Tooltip = 'Wait for the handler to start a dribble move: the game says that is when the ball can be poked free.' })
+            StealBox:AddToggle('PBStealSide', { Text = 'Only when the ball is on my side', Default = true,
+                Tooltip = 'Uses the hand the handler holds the ball in.' })
+            StealBox:AddSlider('PBStealGap', { Text = 'Wait between tries', Default = 1.2, Min = 0.3, Max = 3, Rounding = 1, Suffix = ' s' })
+
+            local ReboundBox = Tabs.Players:AddLeftGroupbox('Rebound Helper')
+            ReboundBox:AddLabel('Draws where a shot or loose ball is going and a ring where it will land, like a grenade helper. Past the rim it turns yellow: the game scripts rim bounces, so that part is a guess until the ball comes off.', true)
+            ReboundBox:AddToggle('PBRebound', { Text = 'Rebound helper', Default = false })
+                :AddColorPicker('PBReboundColor', { Default = Color3.fromRGB(90, 255, 130), Title = 'Path colour' })
+            ReboundBox:AddToggle('PBReboundTime', { Text = 'Show time to land', Default = true })
+            ReboundBox:AddSlider('PBReboundRange', { Text = 'Balls within', Default = 120, Min = 30, Max = 300, Rounding = 0, Suffix = ' studs' })
+
+            local ReadBox = Tabs.Players:AddRightGroupbox('Shot Readout')
+            ReadBox:AddToggle('PBReadout', { Text = 'Shot readout', Default = false,
+                Tooltip = 'Bottom of the screen. With the ball: how open you are and your closest defender. After a shot: grade, the real contest % and the green window.' })
+            ReadBox:AddToggle('PBCoverage', { Text = 'Coverage % over opponents', Default = false,
+                Tooltip = 'Over each opponent\'s head: how much they would contest your shot right now (an estimate from distance and angle; the real number shows in the readout after each shot).' })
+            ReadBox:AddSlider('PBCoverageRange', { Text = 'Show coverage within', Default = 20, Min = 6, Max = 60, Rounding = 0, Suffix = ' studs' })
+
+            local StamBox = Tabs.Players:AddRightGroupbox('Stamina Bars')
+            StamBox:AddToggle('PBStamina', { Text = 'Stamina bars', Default = false,
+                Tooltip = 'A blue bar beside every player, like a health bar, with the stamina they have left. A grey tick marks their fatigue cap when it is below full.' })
+            StamBox:AddToggle('PBStaminaTeam', { Text = 'Teammates too', Default = true })
+            StamBox:AddToggle('PBStaminaNumber', { Text = 'Show the number', Default = false })
+            StamBox:AddSlider('PBStaminaRange', { Text = 'Show within', Default = 120, Min = 20, Max = 400, Rounding = 0, Suffix = ' studs' })
+
+            local function on(name) return Toggles[name] and Toggles[name].Value end
+            local function flat(v) return Vector3.new(v.X, 0, v.Z) end
+
+            -- every character's attributes, the way the game keeps them
+            local attrCtl, attrTry = nil, -1e9
+            local function attr(model, key)
+                if not attrCtl and os.clock() - attrTry > 5 then
+                    attrTry = os.clock()
+                    local ok, A = pcall(function() return require(LocalPlayer.PlayerScripts.Aero.Controllers.Attributes) end)
+                    if ok and type(A) == 'table' and type(rawget(A, 'objects')) == 'table' then attrCtl = A end
+                end
+                local t = attrCtl and attrCtl.objects[model]
+                local v = t and t[key]
+                if v ~= nil then return v end
+                local ok, a = pcall(model.GetAttribute, model, key)
+                if ok and a ~= nil then return a end
+                local f = model:FindFirstChild('Attributes')
+                local c = f and f:FindFirstChild(key)
+                if c and c:IsA('ValueBase') then return c.Value end
+                return nil
+            end
+            local function teamOf(m) return tonumber(attr(m, 'Team')) or 0 end
+            local function isFoe(m, mine) local mt = teamOf(mine) return mt == 0 or teamOf(m) ~= mt end
+            local function partPos(x)
+                if typeof(x) ~= 'Instance' then return nil end
+                local ok, p = pcall(function() return x.Position end)
+                return (ok and typeof(p) == 'Vector3') and p or nil
+            end
+            -- the hoop I attack: my Goal, else the nearest hoop (free play)
+            local function myGoal(me, at)
+                local g = partPos(attr(me, 'Goal'))
+                if g then return g end
+                local hoops, best, bd = workspace:FindFirstChild('Hoops'), nil, math.huge
+                for _, h in ipairs(hoops and hoops:GetChildren() or {}) do
+                    local p = partPos(h:FindFirstChild('Goal'))
+                    if p and (p - at).Magnitude < bd then best, bd = p, (p - at).Magnitude end
+                end
+                return best
+            end
+
+            -- ---- auto steal ---------------------------------------------------------
+            local stealRemote
+            local function stealR()
+                if stealRemote and stealRemote.Parent then return stealRemote end
+                local ok, x = pcall(function() return game:GetService('ReplicatedStorage').Aero.AeroRemoteServices.InputService.Steal end)
+                stealRemote = (ok and typeof(x) == 'Instance' and x:IsA('RemoteEvent')) and x or nil
+                return stealRemote
+            end
+            local steal = { tries = 0, wins = 0, lastTry = -1e9, pending = nil, text = nil }
+            local function stealText(t)
+                if t ~= steal.text then steal.text = t; pcall(StealStatus.SetText, StealStatus, t) end
+            end
+            -- the opponent with the ball I could reach right now (nil = nobody / not yet)
+            local function stealTarget(chars, me, root)
+                local myP, look = root.Position, flat(root.CFrame.LookVector)
+                local reach = (Options.PBStealRange and Options.PBStealRange.Value) or 5
+                for _, m in ipairs(chars:GetChildren()) do
+                    local r = m ~= me and m:IsA('Model') and m:FindFirstChild('HumanoidRootPart')
+                    if r and isFoe(m, me) and attr(m, 'Basketball') then
+                        local off = flat(r.Position - myP)
+                        local d = off.Magnitude
+                        if d <= reach and d > 0.1 and look.Magnitude > 0.1 and off.Unit:Dot(look.Unit) > 0.5 then
+                            local okMove = (not on('PBStealMoves')) or attr(m, 'Action') == 'Dribbling'
+                            local okSide = true
+                            local hand = attr(m, 'Hand')
+                            if on('PBStealSide') and (hand == 'L' or hand == 'R') then
+                                local rv = flat(r.CFrame.RightVector)
+                                local ballSide = (hand == 'R') and rv or -rv
+                                okSide = ballSide.Magnitude < 0.1 or ballSide.Unit:Dot(-off.Unit) > 0
+                            end
+                            return m, okMove and okSide
+                        end
+                    end
+                end
+                return nil, false
+            end
+            htrack(RunService.Heartbeat:Connect(function()
+                if not on('PBAutoSteal') then stealText('Idle'); return end
+                local chars = workspace:FindFirstChild('Characters')
+                local me = chars and chars:FindFirstChild(LocalPlayer.Name)
+                local root = me and me:FindFirstChild('HumanoidRootPart')
+                local now = os.clock()
+                if steal.pending then
+                    if me and attr(me, 'Basketball') then steal.wins = steal.wins + 1; steal.pending = nil
+                    elseif now - steal.pending > 0.8 then steal.pending = nil end
+                end
+                local msg
+                if not root then
+                    msg = 'Waiting for your character'
+                elseif attr(me, 'Basketball') then
+                    msg = 'You have the ball'
+                else
+                    local target, ready = stealTarget(chars, me, root)
+                    local act = attr(me, 'Action')
+                    if not target then
+                        msg = 'Armed - get in front of the ball handler'
+                    elseif not ready then
+                        msg = 'In reach of ' .. target.Name .. ' - waiting for a dribble move / the ball on your side'
+                    else
+                        msg = 'Reaching on ' .. target.Name
+                        local gap = (Options.PBStealGap and Options.PBStealGap.Value) or 1.2
+                        if (act == nil or act == '') and now - steal.lastTry >= gap then
+                            local r = stealR()
+                            if r and pcall(function() r:FireServer() end) then
+                                steal.lastTry, steal.pending = now, now
+                                steal.tries = steal.tries + 1
+                            end
+                        end
+                    end
+                end
+                if steal.tries > 0 then msg = ('%s\n%d of %d tries got the ball'):format(msg, steal.wins, steal.tries) end
+                stealText(msg)
+            end))
+
+            if not Drawing then
+                ReadBox:AddLabel('Your executor has no Drawing API, so the readout, coverage, stamina bars and rebound helper cannot draw.', true)
+                return
+            end
+
+            -- Coverage estimate (one defender): full inside 3 studs, nothing past 10;
+            -- full when he is between me and the hoop, a third beside me, nothing
+            -- behind; a quarter more while he is jumping / blocking. Capped at 60.
+            local function coverage(meP, goalP, defModel, defP)
+                local d = flat(defP - meP).Magnitude
+                if d > 10 then return 0, d, false end
+                local toDef = flat(defP - meP)
+                local toGoal = goalP and flat(goalP - meP) or nil
+                local cosA = (toGoal and toGoal.Magnitude > 0.1 and toDef.Magnitude > 0.1) and toDef.Unit:Dot(toGoal.Unit) or 0.5
+                local distF = math.clamp((10 - d) / 7, 0, 1)
+                local angF = math.clamp((cosA + 0.5) / 1.5, 0, 1)
+                local k = 1
+                local act = attr(defModel, 'Action')
+                if act == 'Blocking' or defP.Y > meP.Y + 1.5 then k = 1.25 end
+                return math.min(60, 60 * distF * angF * k), d, cosA > 0.5
+            end
+            local function contestColor(c)
+                local stops = { Color3.fromRGB(80, 230, 110), Color3.fromRGB(190, 235, 80), Color3.fromRGB(245, 215, 70), Color3.fromRGB(245, 150, 60), Color3.fromRGB(240, 70, 70) }
+                local x = math.clamp(c / 10, 0, 4)
+                local i = math.floor(x)
+                if i >= 4 then return stops[5] end
+                return stops[i + 1]:Lerp(stops[i + 2], x - i)
+            end
+
+            -- the last shot (from the game's own events)
+            local shotInfo = { gw = nil, mtype = nil, estAtRelease = nil, shooting = false, last = nil, lastAt = -1e9 }
+            local GREEN_KEYPOINT = { Bat = true, Hoop = true, Roblox = true, Rocket = true, Vertical = true }
+            local function greenShare(gw, mtype)
+                gw = tonumber(gw)
+                if not gw then return nil end
+                if GREEN_KEYPOINT[mtype] then return math.clamp(gw, 0, 1) end
+                local extra = (mtype == 'Tube' or mtype == 'Diamond') and 0.07 or 0
+                return math.clamp(1 - gw / 100 + extra, 0, 1)
+            end
+            local GRADE = { 'Very Early', 'Early', 'Slightly Early', 'Good', 'Perfect', 'Slightly Late', 'Late', 'Very Late' }
+            local SHOT_NAMES = { ThreePointShot = '3PT', MidRangeShot = 'mid-range', CloseShot = 'close shot', FreeThrow = 'free throw',
+                MovingShot = 'moving shot', DrivingLayup = 'layup', DrivingDunk = 'dunk', StandingDunk = 'dunk', PostHook = 'post hook' }
+            local function isMine(m) return typeof(m) == 'Instance' and m.Name == LocalPlayer.Name end
+            task.spawn(function()
+                local RS = game:GetService('ReplicatedStorage')
+                local ars = RS:WaitForChild('Aero', 60)
+                ars = ars and ars:WaitForChild('AeroRemoteServices', 60)
+                if not ars then return end
+                local function remote(svc, name)
+                    local f = ars:WaitForChild(svc, 30)
+                    local r = f and f:WaitForChild(name, 30)
+                    return (r and r:IsA('RemoteEvent')) and r or nil
+                end
+                local meter, reg, green, feedback = remote('GameplayService', 'Meter'), remote('MeterService', 'RegisterPacket'),
+                    remote('MeterService', 'UpdateGreenWindow'), remote('InterfaceService', 'ShowFeedback')
+                if meter then htrack(meter.OnClientEvent:Connect(function(show, char, mtype)
+                    if not isMine(char) then return end
+                    shotInfo.shooting = show and true or false
+                    if show then shotInfo.mtype = mtype end
+                end)) end
+                if reg then htrack(reg.OnClientEvent:Connect(function(char, mtype, gw)
+                    if not isMine(char) then return end
+                    shotInfo.mtype, shotInfo.gw = mtype, gw
+                end)) end
+                if green then htrack(green.OnClientEvent:Connect(function(char, gw)
+                    if isMine(char) then shotInfo.gw = gw end
+                end)) end
+                if feedback then htrack(feedback.OnClientEvent:Connect(function(char, contest, grade)
+                    if not isMine(char) then return end
+                    local g = tonumber(grade)
+                    shotInfo.last = {
+                        grade = (g and GRADE[g]) or tostring(grade), contest = tonumber(contest),
+                        est = shotInfo.estAtRelease, green = greenShare(shotInfo.gw, shotInfo.mtype),
+                    }
+                    shotInfo.lastAt = os.clock()
+                    local o = shotInfo.out -- the server's log line can come just before
+                    if o and os.clock() - o.at < 2 then shotInfo.last.kind, shotInfo.last.pct = o.kind, o.pct end
+                end)) end
+                -- The server's own log after each of my shots:
+                -- Output("Log", "[ Shot Feedback ][ Shot Type - ThreePointShot ][ Contest - 0 ][ Percentage - 92 ]")
+                local output = remote('InputService', 'Output')
+                if output then htrack(output.OnClientEvent:Connect(function(_, text)
+                    if type(text) ~= 'string' or not text:find('Shot Feedback', 1, true) then return end
+                    local o = { kind = text:match('Shot Type %- (%w+)'), pct = tonumber(text:match('Percentage %- ([%d%.]+)')), at = os.clock() }
+                    shotInfo.out = o
+                    local L = shotInfo.last
+                    if L and os.clock() - shotInfo.lastAt < 2 then L.kind, L.pct = o.kind, o.pct end
+                end)) end
+            end)
+
+            -- drawings (pooled per character model)
+            local function mk(class, props)
+                local d = Drawing.new(class)
+                d.Visible = false
+                for k, v in pairs(props or {}) do d[k] = v end
+                return d
+            end
+            local pool = {}
+            local function drawsFor(m)
+                local o = pool[m]
+                if not o then
+                    o = {
+                        bg = mk('Square', { Filled = true, Color = Color3.fromRGB(10, 10, 12) }),
+                        fill = mk('Square', { Filled = true, Color = Color3.fromRGB(40, 140, 255) }),
+                        cap = mk('Line', { Thickness = 1, Color = Color3.fromRGB(150, 150, 160) }),
+                        num = mk('Text', { Size = 12, Center = true, Outline = true, Color = Color3.fromRGB(120, 190, 255) }),
+                        cov = mk('Text', { Size = 15, Center = true, Outline = true }),
+                    }
+                    pool[m] = o
+                end
+                return o
+            end
+            local function hide(o) for _, d in pairs(o) do d.Visible = false end end
+            local function remove(o) for _, d in pairs(o) do pcall(function() d:Remove() end) end end
+            local live = mk('Text', { Size = 16, Center = true, Outline = true })
+            local after = mk('Text', { Size = 15, Center = true, Outline = true, Color = Color3.fromRGB(230, 230, 234) })
+            htrack({ Disconnect = function()
+                for m, o in pairs(pool) do remove(o); pool[m] = nil end
+                pcall(function() live:Remove() end)
+                pcall(function() after:Remove() end)
+            end })
+
+            htrack(RunService.RenderStepped:Connect(function()
+                local wantCov, wantStam, wantRead = on('PBCoverage'), on('PBStamina'), on('PBReadout')
+                local cam = workspace.CurrentCamera
+                local chars = workspace:FindFirstChild('Characters')
+                local me = chars and chars:FindFirstChild(LocalPlayer.Name)
+                local meRoot = me and me:FindFirstChild('HumanoidRootPart')
+                if not (cam and chars and (wantCov or wantStam or wantRead)) then
+                    for _, o in pairs(pool) do hide(o) end
+                    live.Visible, after.Visible = false, false
+                    return
+                end
+                local meP = meRoot and meRoot.Position
+                local goalP = meP and myGoal(me, meP)
+                local covRange = (Options.PBCoverageRange and Options.PBCoverageRange.Value) or 20
+                local stamRange = (Options.PBStaminaRange and Options.PBStaminaRange.Value) or 120
+                local total, closest, closestFront = 1, nil, false
+                local seen = {}
+                for _, m in ipairs(chars:GetChildren()) do
+                    local root = m:IsA('Model') and m ~= me and m.Name ~= 'InvisCharacter' and m:FindFirstChild('HumanoidRootPart')
+                    if root then
+                        seen[m] = true
+                        local o = drawsFor(m)
+                        local p = root.Position
+                        local foe = (not me) or isFoe(m, me)
+                        local dist = meP and (p - meP).Magnitude or (p - cam.CFrame.Position).Magnitude
+                        -- coverage on me (also feeds the readout)
+                        local c, d, front = 0, nil, false
+                        if meP and foe then
+                            c, d, front = coverage(meP, goalP, m, p)
+                            total = total * (1 - c / 100)
+                            if d and d <= 10 and (not closest or d < closest) then closest, closestFront = d, front end
+                        end
+                        local head = m:FindFirstChild('Head')
+                        local topW = head and (head.Position + Vector3.new(0, head.Size.Y / 2 + 0.3, 0)) or (p + Vector3.new(0, 2.8, 0))
+                        local top, onTop = cam:WorldToViewportPoint(topW)
+                        local bot, onBot = cam:WorldToViewportPoint(p - Vector3.new(0, 3, 0))
+                        if not (onTop or onBot) or top.Z <= 0 then
+                            hide(o)
+                        else
+                            local h = math.max(8, bot.Y - top.Y)
+                            local w = h * 0.45
+                            -- coverage %
+                            if wantCov and foe and meP and dist <= covRange then
+                                o.cov.Text = ('%d%%'):format(math.floor(c + 0.5))
+                                o.cov.Color = contestColor(c)
+                                o.cov.Position = Vector2.new(top.X, top.Y - 18)
+                                o.cov.Visible = true
+                            else
+                                o.cov.Visible = false
+                            end
+                            -- stamina bar
+                            local st = tonumber(m:GetAttribute('Stamina'))
+                            if wantStam and st and dist <= stamRange and (foe or on('PBStaminaTeam')) then
+                                local cap = tonumber(m:GetAttribute('MaxStamina')) or 100
+                                local x = top.X - w / 2 - 7
+                                o.bg.Position, o.bg.Size = Vector2.new(x - 1, top.Y - 1), Vector2.new(5, h + 2)
+                                local fh = h * math.clamp(st / 100, 0, 1)
+                                o.fill.Position, o.fill.Size = Vector2.new(x, top.Y + h - fh), Vector2.new(3, fh)
+                                o.bg.Visible, o.fill.Visible = true, fh > 0.5
+                                if cap < 99 then
+                                    local cy = top.Y + h - h * math.clamp(cap / 100, 0, 1)
+                                    o.cap.From, o.cap.To = Vector2.new(x - 2, cy), Vector2.new(x + 5, cy)
+                                    o.cap.Visible = true
+                                else
+                                    o.cap.Visible = false
+                                end
+                                if on('PBStaminaNumber') then
+                                    o.num.Text = tostring(math.floor(st + 0.5))
+                                    o.num.Position = Vector2.new(x + 1, top.Y - 15)
+                                    o.num.Visible = true
+                                else
+                                    o.num.Visible = false
+                                end
+                            else
+                                o.bg.Visible, o.fill.Visible, o.cap.Visible, o.num.Visible = false, false, false, false
+                            end
+                        end
+                    end
+                end
+                for m, o in pairs(pool) do
+                    if not seen[m] then remove(o); pool[m] = nil end
+                end
+
+                -- readout
+                local contest = (1 - total) * 100
+                if shotInfo.shooting then shotInfo.estAtRelease = contest end
+                local vp = cam.ViewportSize
+                local hasBall = me and attr(me, 'Basketball')
+                if wantRead and meP and (hasBall or shotInfo.shooting) then
+                    live.Text = ('open %d%%  |  %s'):format(math.floor(100 - contest + 0.5),
+                        closest and ('closest %.1f studs%s'):format(closest, closestFront and ', in front' or ', beside / behind') or 'nobody within 10 studs')
+                    live.Color = contestColor(contest)
+                    live.Position = Vector2.new(vp.X / 2, vp.Y - 150)
+                    live.Visible = true
+                else
+                    live.Visible = false
+                end
+                local L = shotInfo.last
+                if wantRead and L and os.clock() - shotInfo.lastAt < 8 then
+                    local parts = { L.grade }
+                    if L.kind or L.pct then
+                        local name = L.kind and (SHOT_NAMES[L.kind] or L.kind:gsub('Shot$', '')) or 'shot'
+                        parts[#parts + 1] = L.pct and ('%s, %d%% to go in'):format(name, math.floor(L.pct + 0.5)) or name
+                    end
+                    if L.contest then
+                        parts[#parts + 1] = ('%d%% contested%s'):format(math.floor(L.contest + 0.5),
+                            L.est and (' (we read %d%%)'):format(math.floor(L.est + 0.5)) or '')
+                    end
+                    if L.green then parts[#parts + 1] = ('green %d%%'):format(math.floor(L.green * 100 + 0.5)) end
+                    after.Text = table.concat(parts, '  |  ')
+                    after.Position = Vector2.new(vp.X / 2, vp.Y - 128)
+                    after.Visible = true
+                else
+                    after.Visible = false
+                end
+            end))
+
+            -- ---- rebound helper ---------------------------------------------------
+            local rp = RaycastParams.new()
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            pcall(function() rp.RespectCanCollide = true end)
+            pcall(function() rp.CollisionGroup = 'Basketballs' end) -- only what the ball can hit
+            local BALL_R, SEGS, RING = 0.7, 60, 18
+            local hasSphere = false
+            do
+                local ok, f = pcall(function() return workspace.Spherecast end)
+                hasSphere = ok and type(f) == 'function'
+            end
+            local function cast(p, d)
+                if hasSphere then return workspace:Spherecast(p, BALL_R, d, rp) end
+                return workspace:Raycast(p, d, rp)
+            end
+            -- Fit p(t) = p0 + v*t + g*t^2/2 (g known) to the recent rendered positions:
+            -- with the gravity term moved over it is a straight line per axis.
+            local function fitArc(s, g)
+                local n = #s
+                if n < 3 then return nil end
+                local tN = s[n].t
+                local mt, my, ys = 0, Vector3.zero, {}
+                for i = 1, n do
+                    local tau = s[i].t - tN
+                    local y = s[i].p + Vector3.new(0, 0.5 * g * tau * tau, 0)
+                    ys[i] = { tau, y }
+                    mt, my = mt + tau, my + y
+                end
+                mt, my = mt / n, my / n
+                local sxx, sxy = 0, Vector3.zero
+                for i = 1, n do
+                    local dt = ys[i][1] - mt
+                    sxx = sxx + dt * dt
+                    sxy = sxy + (ys[i][2] - my) * dt
+                end
+                if sxx < 1e-6 then return nil end
+                local v = sxy / sxx
+                return { t = tN, p = my - v * mt, v = v }
+            end
+            local function arcAt(f, t, g)
+                local tau = t - f.t
+                return f.p + f.v * tau + Vector3.new(0, -0.5 * g * tau * tau, 0)
+            end
+            -- Step forward until the ball lands on something facing up that is not part
+            -- of a hoop; rim / backboard / walls bounce it (rim 0.35, board 0.8, else 0.5).
+            local function predict(p, v, g, hoops)
+                local pts, bounceAt, land, normal, tLand = { p }, nil, nil, nil, nil
+                local dt, t, bounces = 1 / 60, 0, 0
+                while t < 3 do
+                    local step = v * dt + Vector3.new(0, -0.5 * g * dt * dt, 0)
+                    local res = step.Magnitude > 1e-4 and cast(p, step) or nil
+                    if res then
+                        local frac = math.clamp(res.Distance / step.Magnitude, 0, 1)
+                        local c = p + step * frac
+                        t = t + dt * frac
+                        pts[#pts + 1] = c
+                        local inst = res.Instance
+                        local hoop = hoops ~= nil and inst ~= nil and inst:IsDescendantOf(hoops)
+                        if not hoop and res.Normal.Y > 0.6 then
+                            land, normal, tLand = res.Position, res.Normal, t
+                            break
+                        end
+                        if hoop and not bounceAt then bounceAt = #pts end
+                        bounces = bounces + 1
+                        if bounces > 6 then break end
+                        local vHit = v + Vector3.new(0, -g * dt * frac, 0)
+                        local e = (inst and inst.Name == 'Rim') and 0.35 or (hoop and 0.8 or 0.5)
+                        local n = res.Normal
+                        v = vHit - n * ((1 + e) * vHit:Dot(n))
+                        p = c + n * 0.02
+                    else
+                        p = p + step
+                        v = v + Vector3.new(0, -g * dt, 0)
+                        t = t + dt
+                        pts[#pts + 1] = p
+                    end
+                end
+                return { pts = pts, bounceAt = bounceAt, land = land, normal = normal, tLand = tLand, at = os.clock() }
+            end
+
+            local track, paths, rdraw = {}, {}, {}
+            local function rdrawFor(b)
+                local o = rdraw[b]
+                if not o then
+                    o = { lines = {}, ring = {}, txt = mk('Text', { Size = 14, Center = true, Outline = true }) }
+                    for i = 1, SEGS do o.lines[i] = mk('Line', { Thickness = 2 }) end
+                    for i = 1, RING do o.ring[i] = mk('Line', { Thickness = 2 }) end
+                    rdraw[b] = o
+                end
+                return o
+            end
+            local function rhide(o)
+                for _, l in ipairs(o.lines) do l.Visible = false end
+                for _, l in ipairs(o.ring) do l.Visible = false end
+                o.txt.Visible = false
+            end
+            local function rremove(o)
+                for _, l in ipairs(o.lines) do pcall(function() l:Remove() end) end
+                for _, l in ipairs(o.ring) do pcall(function() l:Remove() end) end
+                pcall(function() o.txt:Remove() end)
+            end
+            htrack({ Disconnect = function() for b, o in pairs(rdraw) do rremove(o); rdraw[b] = nil end end })
+
+            local frameN = 0
+            htrack(RunService.RenderStepped:Connect(function()
+                if not on('PBRebound') then
+                    for _, o in pairs(rdraw) do rhide(o) end
+                    table.clear(track); table.clear(paths)
+                    return
+                end
+                frameN = frameN + 1
+                local cam = workspace.CurrentCamera
+                local bf = workspace:FindFirstChild('Basketballs')
+                if not (cam and bf) then return end
+                local chars = workspace:FindFirstChild('Characters')
+                local hoops = workspace:FindFirstChild('Hoops')
+                local filt = { bf }
+                if chars then filt[#filt + 1] = chars end
+                rp.FilterDescendantsInstances = filt
+                local g = workspace.Gravity
+                local now = os.clock()
+                -- balls in someone's hands (welded to their HumanoidRootPart.Basketball)
+                local held = {}
+                for _, m in ipairs(chars and chars:GetChildren() or {}) do
+                    local r = m:FindFirstChild('HumanoidRootPart')
+                    local w = r and r:FindFirstChild('Basketball')
+                    if w and w:IsA('Motor6D') and w.Part1 then held[w.Part1] = true end
+                end
+                local me = chars and chars:FindFirstChild(LocalPlayer.Name)
+                local meRoot = me and me:FindFirstChild('HumanoidRootPart')
+                local origin = meRoot and meRoot.Position or cam.CFrame.Position
+                local range = (Options.PBReboundRange and Options.PBReboundRange.Value) or 120
+                local color = (Options.PBReboundColor and Options.PBReboundColor.Value) or Color3.fromRGB(90, 255, 130)
+                local guess = Color3.fromRGB(245, 215, 70)
+                local seen = {}
+                for _, b in ipairs(bf:GetChildren()) do
+                    if b:IsA('BasePart') then
+                        seen[b] = true
+                        local o = rdrawFor(b)
+                        local p = b.Position
+                        local tr = track[b]
+                        if not tr then tr = { s = {} }; track[b] = tr end
+                        if held[b] or (p - origin).Magnitude > range then
+                            table.clear(tr.s); tr.fit = nil; paths[b] = nil
+                        else
+                            local s = tr.s
+                            if #s == 0 or (p - s[#s].p).Magnitude > 1e-3 then
+                                -- off the fitted arc = a new stage or a bounce: start a new fit from
+                                -- the previous sample (already past the change) and this one
+                                if tr.fit and (arcAt(tr.fit, now, g) - p).Magnitude > 0.25 then
+                                    local last = s[#s]
+                                    table.clear(s)
+                                    if last then s[1] = last end
+                                    tr.fit = nil
+                                end
+                                s[#s + 1] = { t = now, p = p }
+                                while #s > 8 or (#s > 3 and now - s[1].t > 0.2) do table.remove(s, 1) end
+                                tr.fit = fitArc(s, g) or tr.fit
+                            end
+                            local f = tr.fit
+                            if f and f.v.Magnitude > 3 then
+                                if frameN % 2 == 0 or not paths[b] then
+                                    paths[b] = predict(arcAt(f, now, g), f.v + Vector3.new(0, -g * (now - f.t), 0), g, hoops)
+                                end
+                            elseif not f and paths[b] and now - paths[b].at < 0.2 then
+                                -- keep the last path through the few frames a new fit needs
+                            else
+                                paths[b] = nil
+                            end
+                        end
+                        local path = paths[b]
+                        if not path then
+                            rhide(o)
+                        else
+                            local pts = path.pts
+                            local stepN = math.max(1, math.ceil((#pts - 1) / SEGS))
+                            local li, i = 0, 1
+                            while i < #pts and li < SEGS do
+                                local j = math.min(#pts, i + stepN)
+                                local a = cam:WorldToViewportPoint(pts[i])
+                                local z = cam:WorldToViewportPoint(pts[j])
+                                li = li + 1
+                                local L = o.lines[li]
+                                if a.Z > 0 and z.Z > 0 then
+                                    L.From, L.To = Vector2.new(a.X, a.Y), Vector2.new(z.X, z.Y)
+                                    L.Color = (path.bounceAt and j > path.bounceAt) and guess or color
+                                    L.Visible = true
+                                else
+                                    L.Visible = false
+                                end
+                                i = j
+                            end
+                            for k = li + 1, SEGS do o.lines[k].Visible = false end
+                            if path.land then
+                                local n = path.normal or Vector3.new(0, 1, 0)
+                                local u = n:Cross(Vector3.new(1, 0, 0))
+                                if u.Magnitude < 0.1 then u = n:Cross(Vector3.new(0, 0, 1)) end
+                                u = u.Unit
+                                local w = n:Cross(u).Unit
+                                local c0 = path.land + n * 0.05
+                                local rc = path.bounceAt and guess or color
+                                for k = 1, RING do
+                                    local a1, a2 = (k - 1) / RING * math.pi * 2, k / RING * math.pi * 2
+                                    local s1 = cam:WorldToViewportPoint(c0 + (u * math.cos(a1) + w * math.sin(a1)) * 1.4)
+                                    local s2 = cam:WorldToViewportPoint(c0 + (u * math.cos(a2) + w * math.sin(a2)) * 1.4)
+                                    local L = o.ring[k]
+                                    if s1.Z > 0 and s2.Z > 0 then
+                                        L.From, L.To, L.Color, L.Visible = Vector2.new(s1.X, s1.Y), Vector2.new(s2.X, s2.Y), rc, true
+                                    else
+                                        L.Visible = false
+                                    end
+                                end
+                                local sp = cam:WorldToViewportPoint(c0)
+                                if on('PBReboundTime') and path.tLand and sp.Z > 0 then
+                                    o.txt.Text = ('%.1fs'):format(math.max(0, path.tLand - (now - path.at)))
+                                    o.txt.Color = rc
+                                    o.txt.Position = Vector2.new(sp.X, sp.Y + 10)
+                                    o.txt.Visible = true
+                                else
+                                    o.txt.Visible = false
+                                end
+                            else
+                                for _, l in ipairs(o.ring) do l.Visible = false end
+                                o.txt.Visible = false
+                            end
+                        end
+                    end
+                end
+                for b, o in pairs(rdraw) do
+                    if not seen[b] then rremove(o); rdraw[b] = nil; track[b] = nil; paths[b] = nil end
+                end
+            end))
+        end)()
+
         -- ===== LOGIC: Auto Perfect Release ================================
         -- Grounded in the decompiled client (Controllers/Meter, Input/Keyboard,
         -- UI/Character/ShotFeedback, UI/LearnPB/Tutorial) + logged sessions:

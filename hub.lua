@@ -9043,68 +9043,32 @@ if HUB_CURRENT ~= 'roguecopy' then
         end) end
     elseif HUB_CURRENT == 'rvls' then
         -- ===== RVLS (RIVALS, first-person shooter) ========================
-        -- Features rebuilt from Sources/rr onto this menu. Nothing from that
-        -- script's library, owner/admin lists or watermark text was kept, and
-        -- nothing here talks to the network. Game-specific bits (the gun, its
-        -- shots) are found generically; tune them once there is a RIVALS dump.
+        -- SAFE BUILD. RIVALS is a hardened competitive FPS: its shooting, camera
+        -- and replication are obfuscated, the server re-simulates every shot and
+        -- runs a position anti-cheat, and its own ban reasons are "Aim",
+        -- "Movement" and "Vision Cheats". So this game only gets what actually
+        -- works and isn't a flagged category: ESP, map lighting and chams, all
+        -- visual-only. Fly and Noclip are offered but marked RISKY (the server
+        -- watches position). No aim, no triggerbot, no hitbox, no silent aim.
+        -- Nothing here touches ReplicatedStorage.Modules.ItemLibrary.Items - that
+        -- table is a honeypot that freezes the client if an exploit reads it.
+        -- Facts from the decompiled client (RivalsSRC/extracted): viewmodels live
+        -- at workspace.ViewModels.FirstPerson.<name> with the gun under an
+        -- 'ItemVisual' model and arms named LeftArm/RightArm; characters are R15
+        -- fighters; there are no Roblox Teams (TeamID is a replicated field we
+        -- can't read from here), so ESP shows every other player.
         local Players     = game:GetService('Players')
         local LocalPlayer = Players.LocalPlayer
         local Lighting    = game:GetService('Lighting')
-        local VIM         = game:GetService('VirtualInputManager')
         local CoreGui     = game:GetService('CoreGui')
 
         local Tabs = {
-            Aiming   = Window:AddTab('Aiming'),
             Visuals  = Window:AddTab('Visuals'),
             Movement = Window:AddTab('Movement'),
             Misc     = Window:AddTab('Misc'),
         }
         local function on(id) local t = Toggles[id]; return t and t.Value or false end
         local function opt(id, d) local o = Options[id]; local v = o and o.Value; if v == nil then return d end; return v end
-
-        -- ===== UI: Aiming ==================================================
-        local SilentBox = Tabs.Aiming:AddLeftGroupbox('Silent Aim')
-        SilentBox:AddToggle('RVSilent', { Text = 'Silent aim', Default = false, Risky = true,
-            Tooltip = 'Your shots go to the closest enemy inside the circle without moving your camera. Works by bending the game\'s own shot raycasts, so it only works if RIVALS traces its shots on your client. The server can see hits you were not aiming at.' })
-            :AddKeyPicker('RVSilentKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Silent aim' })
-        SilentBox:AddDropdown('RVSilentPart', { Values = { 'Head', 'Torso' }, Default = 1, Multi = false, Text = 'Aim at' })
-        SilentBox:AddSlider('RVSilentFov', { Text = 'FOV', Default = 150, Min = 50, Max = 800, Rounding = 0, Suffix = ' px' })
-        SilentBox:AddSlider('RVSilentPred', { Text = 'Prediction', Default = 0.1, Min = 0, Max = 0.3, Rounding = 2, Suffix = ' s',
-            Tooltip = 'Leads moving targets by their velocity times this.' })
-        SilentBox:AddToggle('RVSilentCircle', { Text = 'Show FOV circle', Default = true })
-
-        local AimBox = Tabs.Aiming:AddRightGroupbox('Aimbot')
-        AimBox:AddToggle('RVAimbot', { Text = 'Aimbot (hold right mouse)', Default = false,
-            Tooltip = 'While you hold right mouse, your aim is pulled onto the closest enemy inside the circle.' })
-            :AddKeyPicker('RVAimbotKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Aimbot' })
-        AimBox:AddToggle('RVAimInstant', { Text = 'Instalock', Default = false, Tooltip = 'Snap straight on instead of easing.' })
-        AimBox:AddDropdown('RVAimPart', { Values = { 'Head', 'Torso', 'HumanoidRootPart' }, Default = 1, Multi = false, Text = 'Aim at' })
-        AimBox:AddDropdown('RVAimMethod', { Values = { 'Camera', 'Mouse' }, Default = 1, Multi = false, Text = 'Method',
-            Tooltip = 'Camera turns the camera directly. Mouse moves your mouse instead (mousemoverel); use it if the camera method does not stick.' })
-        AimBox:AddSlider('RVAimFov', { Text = 'FOV', Default = 120, Min = 20, Max = 600, Rounding = 0, Suffix = ' px' })
-        AimBox:AddSlider('RVAimSmooth', { Text = 'Smoothness', Default = 15, Min = 1, Max = 100, Rounding = 0, Suffix = '%',
-            Tooltip = 'How much of the way it turns each frame. Lower is slower and looks more human.' })
-
-        local TargetBox = Tabs.Aiming:AddRightGroupbox('Targets')
-        TargetBox:AddToggle('RVTeamCheck', { Text = 'Skip teammates', Default = true,
-            Tooltip = 'Aiming, triggerbot, hitboxes and ESP ignore players on your team. If everyone is on one team (free-for-all), nobody is skipped.' })
-        TargetBox:AddToggle('RVWallCheck', { Text = 'Visible only', Default = false,
-            Tooltip = 'Silent aim, aimbot and triggerbot ignore enemies behind walls.' })
-
-        local TrigBox = Tabs.Aiming:AddLeftGroupbox('Triggerbot')
-        TrigBox:AddToggle('RVTrigger', { Text = 'Triggerbot', Default = false,
-            Tooltip = 'Shoots for you when your crosshair is on an enemy\'s head.' })
-            :AddKeyPicker('RVTriggerKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Triggerbot' })
-        TrigBox:AddSlider('RVTrigDelay', { Text = 'Delay', Default = 100, Min = 0, Max = 500, Rounding = 0, Suffix = ' ms',
-            Tooltip = 'How long the head has to stay under your crosshair before each shot.' })
-
-        local HitBox = Tabs.Aiming:AddLeftGroupbox('Hitbox Expander')
-        HitBox:AddToggle('RVHitbox', { Text = 'Bigger heads', Default = false, Risky = true,
-            Tooltip = 'Makes enemy heads bigger on your screen so they are easier to hit. If the server checks hits against the real head size, these hits can be thrown out or flagged.' })
-            :AddKeyPicker('RVHitboxKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Hitbox expander' })
-        HitBox:AddSlider('RVHitboxSize', { Text = 'Head size', Default = 5, Min = 1, Max = 15, Rounding = 1, Suffix = ' studs' })
-        HitBox:AddToggle('RVHitboxInvis', { Text = 'Invisible hitbox', Default = false,
-            Tooltip = 'Hides the enlarged head instead of showing it as a red force field.' })
 
         -- ===== UI: Visuals =================================================
         local EspBox = Tabs.Visuals:AddLeftGroupbox('ESP')
@@ -9114,58 +9078,46 @@ if HUB_CURRENT ~= 'roguecopy' then
             Tooltip = 'Fills enemies with the ESP color, visible through walls.' })
         EspBox:AddToggle('RVEspNames', { Text = 'Names', Default = false })
         EspBox:AddToggle('RVEspDistance', { Text = 'Distance', Default = false })
+        EspBox:AddToggle('RVEspHealth', { Text = 'Health', Default = false })
         EspBox:AddToggle('RVEspTracers', { Text = 'Tracers', Default = false })
         EspBox:AddToggle('RVEspSkeleton', { Text = 'Skeletons', Default = false })
+        EspBox:AddSlider('RVEspMaxDist', { Text = 'Max distance', Default = 1500, Min = 50, Max = 5000, Rounding = 0, Suffix = ' studs' })
 
         local WorldBox = Tabs.Visuals:AddRightGroupbox('World')
-        WorldBox:AddToggle('RVWorld', { Text = 'Map lighting', Default = false })
+        WorldBox:AddToggle('RVWorld', { Text = 'Map lighting', Default = false,
+            Tooltip = 'Recolors / brightens the whole map. Only you see it.' })
             :AddColorPicker('RVWorldTint', { Default = Color3.fromRGB(255, 255, 255), Title = 'Lighting color' })
         WorldBox:AddSlider('RVWorldBright', { Text = 'Brightness', Default = 0, Min = -1, Max = 1, Rounding = 2 })
         WorldBox:AddSlider('RVWorldContrast', { Text = 'Contrast', Default = 0, Min = -1, Max = 1, Rounding = 2 })
 
         local ChamBox = Tabs.Visuals:AddLeftGroupbox('Client Visuals')
         ChamBox:AddToggle('RVSelfChams', { Text = 'Body chams', Default = false,
-            Tooltip = 'Recolors your own body. Only you see it.' })
+            Tooltip = 'Recolors your own character. Only you see it.' })
             :AddColorPicker('RVSelfChamsColor', { Default = Color3.fromRGB(133, 87, 242), Title = 'Body color' })
         ChamBox:AddDropdown('RVSelfChamsMat', { Values = { 'ForceField', 'Glass', 'Neon' }, Default = 1, Multi = false, Text = 'Body material' })
         ChamBox:AddToggle('RVGunChams', { Text = 'Gun chams', Default = false,
-            Tooltip = 'Recolors your gun: your equipped tool and the first-person gun model (arms and hands are left alone). Only you see it.' })
+            Tooltip = 'Recolors your first-person gun (the viewmodel\'s weapon; arms are left alone). Only you see it.' })
             :AddColorPicker('RVGunChamsColor', { Default = Color3.fromRGB(255, 0, 0), Title = 'Gun color' })
         ChamBox:AddDropdown('RVGunChamsMat', { Values = { 'ForceField', 'Glass', 'Neon' }, Default = 1, Multi = false, Text = 'Gun material' })
 
-        local TracerBox = Tabs.Visuals:AddRightGroupbox('Bullet Tracers')
-        TracerBox:AddToggle('RVBulletTracers', { Text = 'Bullet tracers', Default = false,
-            Tooltip = 'Draws a line for each of your shots, fading over a second. Reads the game\'s shot raycasts the same way silent aim does (without changing them), so it shows nothing if RIVALS traces shots on the server.' })
-            :AddColorPicker('RVTracerColor', { Default = Color3.fromRGB(255, 0, 0), Title = 'Tracer color' })
-
         -- ===== UI: Movement ================================================
-        local SpinBox = Tabs.Movement:AddLeftGroupbox('Spinbot')
-        SpinBox:AddToggle('RVSpin', { Text = 'Spinbot', Default = false, Tooltip = 'Spins your character. Everyone sees it.' })
-            :AddKeyPicker('RVSpinKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Spinbot' })
-        SpinBox:AddSlider('RVSpinSpeed', { Text = 'Spin speed', Default = 10, Min = 1, Max = 50, Rounding = 0 })
-
-        local FlyBox = Tabs.Movement:AddRightGroupbox('Fly')
+        local FlyBox = Tabs.Movement:AddLeftGroupbox('Fly')
         FlyBox:AddToggle('RVFly', { Text = 'Fly', Default = false, Risky = true,
-            Tooltip = 'WASD to move, Space / Left Shift for up / down, relative to the camera. Your position is sent to the server, which can check for flying.' })
+            Tooltip = 'WASD to move, Space / Left Shift for up / down, relative to the camera. RISKY: RIVALS runs a server-side position check and kills you out of bounds; flying can be flagged as a Movement cheat.' })
             :AddKeyPicker('RVFlyKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Fly' })
-        FlyBox:AddSlider('RVFlySpeed', { Text = 'Fly speed', Default = 30, Min = 30, Max = 300, Rounding = 0, Suffix = ' studs/s' })
+        FlyBox:AddSlider('RVFlySpeed', { Text = 'Fly speed', Default = 30, Min = 20, Max = 200, Rounding = 0, Suffix = ' studs/s' })
 
-        local NoclipBox = Tabs.Movement:AddLeftGroupbox('Noclip')
-        NoclipBox:AddToggle('RVNoclip', { Text = 'Noclip', Default = false, Tooltip = 'Walk through walls.' })
+        local NoclipBox = Tabs.Movement:AddRightGroupbox('Noclip')
+        NoclipBox:AddToggle('RVNoclip', { Text = 'Noclip', Default = false, Risky = true,
+            Tooltip = 'Walk through walls. RISKY: the server position check can flag being somewhere you should not be.' })
             :AddKeyPicker('RVNoclipKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Noclip' })
-
-        local SpeedBox = Tabs.Movement:AddRightGroupbox('Speed')
-        SpeedBox:AddToggle('RVSpeed', { Text = 'Speed', Default = false, Risky = true,
-            Tooltip = 'Moves you faster than the game does, on top of its own speed (sprint, slide). The server can check for it.' })
-            :AddKeyPicker('RVSpeedKey', { Default = 'None', SyncToggleState = true, Mode = 'Toggle', Text = 'Speed' })
-        SpeedBox:AddSlider('RVSpeedMult', { Text = 'Multiplier', Default = 2, Min = 1, Max = 10, Rounding = 1, Suffix = 'x' })
 
         -- ===== UI: Misc (ids + tools, shared) ==============================
         buildMiscTab(Tabs.Misc, 'RVLS', 'RIVALS')
         local WmBox = Tabs.Misc:AddLeftGroupbox('Watermark')
         WmBox:AddToggle('RVWatermark', { Text = 'Watermark', Default = false, Tooltip = 'Shows Reverie, your FPS and the time in a corner.' })
 
-        -- ===== Shared helpers ==============================================
+        -- ===== Helpers ======================================================
         local function myChar() return LocalPlayer.Character end
         local function myRoot() local c = myChar(); return c and c:FindFirstChild('HumanoidRootPart') end
         local function myHum() local c = myChar(); return c and c:FindFirstChildOfClass('Humanoid') end
@@ -9174,337 +9126,15 @@ if HUB_CURRENT ~= 'roguecopy' then
             if c and c.Parent then return c end
             return nil
         end
-        -- Teams only count when they split the server: if everyone is on your team
-        -- (a free-for-all that still puts players in one team), nobody is skipped.
-        local teamsSplit = false
-        htrack(RunService.Heartbeat:Connect(function()
-            local mine, split = LocalPlayer.Team, false
-            if typeof(mine) == 'Instance' then
-                for _, p in ipairs(Players:GetPlayers()) do
-                    if p ~= LocalPlayer and p.Team ~= mine then split = true; break end
-                end
-            end
-            teamsSplit = split
-        end))
-        local function isFoe(p)
-            if p == LocalPlayer then return false end
-            if on('RVTeamCheck') and teamsSplit and p.Team == LocalPlayer.Team then return false end
-            return true
-        end
         local function aliveHum(char)
             local h = char and char:FindFirstChildOfClass('Humanoid')
             return h and h.Health > 0 and h or nil
         end
-        local function partOf(char, which)
-            if which == 'Torso' then
-                return char:FindFirstChild('UpperTorso') or char:FindFirstChild('Torso') or char:FindFirstChild('HumanoidRootPart')
-            end
-            return char:FindFirstChild(which or 'Head') or char:FindFirstChild('Head') or char:FindFirstChild('HumanoidRootPart')
-        end
-        local losParams = RaycastParams.new()
-        losParams.FilterType = Enum.RaycastFilterType.Exclude
-        losParams.IgnoreWater = true
-        local function canSee(pos, char)
-            local cam = workspace.CurrentCamera
-            if not cam then return false end
-            losParams.FilterDescendantsInstances = { cam, myChar() }
-            local origin = cam.CFrame.Position
-            local hit = workspace:Raycast(origin, pos - origin, losParams)
-            return (not hit) or hit.Instance:IsDescendantOf(char)
-        end
-        -- Closest enemy to a screen point, inside a pixel radius.
-        local function closestTo(screen, radius, which, lead)
-            local cam = workspace.CurrentCamera
-            if not cam then return nil end
-            local best, bestPos, bestD = nil, nil, radius
-            for _, p in ipairs(Players:GetPlayers()) do
-                if isFoe(p) then
-                    local char = charOf(p)
-                    local part = char and aliveHum(char) and partOf(char, which)
-                    if part then
-                        local pos = part.Position
-                        if lead and lead > 0 then
-                            local root = char:FindFirstChild('HumanoidRootPart') or part
-                            pos = pos + root.AssemblyLinearVelocity * lead
-                        end
-                        local sp, vis = cam:WorldToViewportPoint(pos)
-                        if vis and sp.Z > 0 then
-                            local d = (Vector2.new(sp.X, sp.Y) - screen).Magnitude
-                            if d < bestD and (not on('RVWallCheck') or canSee(pos, char)) then
-                                best, bestPos, bestD = p, pos, d
-                            end
-                        end
-                    end
-                end
-            end
-            return best, bestPos
-        end
-        local function mouseAt() return UIS:GetMouseLocation() end
-        local function screenCenter()
-            local cam = workspace.CurrentCamera
-            local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
-            return Vector2.new(vp.X / 2, vp.Y / 2)
-        end
-        local function menuBusy()
-            return Library.Toggled or UIS:GetFocusedTextBox() ~= nil
-        end
 
-        -- ===== Shot hook (silent aim + bullet tracers) =====================
-        -- Installed the first time either is turned on, never before. Only the
-        -- game's own raycasts that start at the camera, point along your aim and
-        -- come right after a click are touched; everything else passes through.
-        -- Our own raycasts pass checkcaller() and are never touched.
-        local shot = { aim = nil, camPos = nil, camLook = nil, firedAt = -1, hooked = false, failed = false }
-        local tracers = {} -- { from, to, born }
-        local MAX_TRACERS = 40
-        local function addTracer(from, to)
-            if #tracers >= MAX_TRACERS then table.remove(tracers, 1) end
-            tracers[#tracers + 1] = { from = from, to = to, born = os.clock() }
-        end
-        local function bend(origin, dir)
-            local aim, look = shot.aim, shot.camLook
-            if not (aim and look) then return dir end
-            local want = aim - origin
-            if want.Magnitude < 1e-3 then return dir end
-            want = want.Unit
-            local axis = look:Cross(want)
-            local s = axis.Magnitude
-            if s < 1e-6 then return dir end
-            -- turn the ray by the same rotation that takes your aim onto the target,
-            -- so spread (shotgun pellets) stays spread around the target
-            return CFrame.fromAxisAngle(axis / s, math.atan2(s, look:Dot(want))) * dir
-        end
-        local function isShotRay(origin, dir)
-            local cp, look = shot.camPos, shot.camLook
-            if not (cp and look) or os.clock() - shot.firedAt > 0.3 then return false end
-            if (origin - cp).Magnitude > 8 or dir.Magnitude < 1 then return false end
-            return dir.Unit:Dot(look) > 0.985 -- within ~10 degrees of your aim
-        end
-        local function ensureShotHook()
-            if shot.hooked or shot.failed then return shot.hooked end
-            local hookMeta, getNC = hookmetamethod, getnamecallmethod
-            local canCall = checkcaller or function() return false end
-            if not (hookMeta and getNC) then
-                shot.failed = true
-                Library:Notify('RVLS: your executor has no hookmetamethod, so silent aim and bullet tracers are off', 6)
-                return false
-            end
-            local wrap = newcclosure or function(f) return f end
-            local nmOld
-            local okH = pcall(function()
-                nmOld = hookMeta(game, '__namecall', wrap(function(self, ...)
-                    if nmOld and self == workspace and not canCall() then
-                        local m = getNC()
-                        if m == 'Raycast' or m == 'Spherecast' then
-                            local args = table.pack(...)
-                            local di = (m == 'Raycast') and 2 or 3
-                            local origin, dir = args[1], args[di]
-                            if typeof(origin) == 'Vector3' and typeof(dir) == 'Vector3' and isShotRay(origin, dir) then
-                                if Toggles.RVSilent and Toggles.RVSilent.Value and shot.aim then
-                                    args[di] = bend(origin, dir)
-                                    dir = args[di]
-                                end
-                                local res = nmOld(self, table.unpack(args, 1, args.n))
-                                if Toggles.RVBulletTracers and Toggles.RVBulletTracers.Value then
-                                    addTracer(origin, res and res.Position or (origin + dir))
-                                end
-                                return res
-                            end
-                        elseif m == 'FindPartOnRay' or m == 'FindPartOnRayWithIgnoreList' or m == 'FindPartOnRayWithWhitelist' then
-                            local args = table.pack(...)
-                            local ray = args[1]
-                            if typeof(ray) == 'Ray' and isShotRay(ray.Origin, ray.Direction) then
-                                if Toggles.RVSilent and Toggles.RVSilent.Value and shot.aim then
-                                    ray = Ray.new(ray.Origin, bend(ray.Origin, ray.Direction))
-                                    args[1] = ray
-                                end
-                                local r = table.pack(nmOld(self, table.unpack(args, 1, args.n)))
-                                if Toggles.RVBulletTracers and Toggles.RVBulletTracers.Value then
-                                    addTracer(ray.Origin, (typeof(r[2]) == 'Vector3' and r[2]) or (ray.Origin + ray.Direction))
-                                end
-                                return table.unpack(r, 1, r.n)
-                            end
-                        end
-                    end
-                    if nmOld then return nmOld(self, ...) end
-                    return self[getNC()](self, ...)
-                end))
-            end)
-            if okH and nmOld then
-                shot.hooked = true
-                htrack({ Disconnect = function() pcall(function() hookMeta(game, '__namecall', nmOld) end) end })
-            else
-                shot.failed = true
-                Library:Notify('RVLS: the shot hook failed, so silent aim and bullet tracers are off', 6)
-            end
-            return shot.hooked
-        end
-        if Toggles.RVSilent then Toggles.RVSilent:OnChanged(function()
-            if Toggles.RVSilent.Value then ensureShotHook() else shot.aim = nil end
-        end) end
-        if Toggles.RVBulletTracers then Toggles.RVBulletTracers:OnChanged(function()
-            if Toggles.RVBulletTracers.Value then ensureShotHook() else table.clear(tracers) end
-        end) end
-        htrack(UIS.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then shot.firedAt = os.clock() end
-        end))
-
-        -- ===== Aimbot (BindToRenderStep, right after the game's camera) ====
-        local AIM_BIND = 'rv' .. tostring(math.random(100000, 999999))
-        RunService:BindToRenderStep(AIM_BIND, Enum.RenderPriority.Camera.Value + 1, function(dt)
-            local cam = workspace.CurrentCamera
-            if not cam then return end
-            local cf = cam.CFrame
-            shot.camPos, shot.camLook = cf.Position, cf.LookVector
-            if UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then shot.firedAt = os.clock() end
-
-            -- silent aim target (screen center: that is where the shots start)
-            if on('RVSilent') then
-                local _, pos = closestTo(screenCenter(), opt('RVSilentFov', 150), opt('RVSilentPart', 'Head'), opt('RVSilentPred', 0.1))
-                shot.aim = pos
-            else
-                shot.aim = nil
-            end
-
-            if not on('RVAimbot') or menuBusy() or not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
-            local _, pos = closestTo(mouseAt(), opt('RVAimFov', 120), opt('RVAimPart', 'Head'), 0)
-            if not pos then return end
-            local instant = on('RVAimInstant')
-            local a = math.clamp(opt('RVAimSmooth', 15) / 100, 0.01, 1)
-            local alpha = instant and 1 or (1 - (1 - a) ^ math.clamp(dt * 60, 0, 4)) -- same feel at any FPS
-            if opt('RVAimMethod', 'Camera') == 'Mouse' and mousemoverel then
-                local sp = cam:WorldToViewportPoint(pos)
-                local m = mouseAt()
-                pcall(mousemoverel, (sp.X - m.X) * alpha, (sp.Y - m.Y) * alpha)
-            else
-                local goal = CFrame.lookAt(cf.Position, pos)
-                cam.CFrame = instant and goal or cf:Lerp(goal, alpha)
-            end
-        end)
-        htrack({ Disconnect = function() pcall(function() RunService:UnbindFromRenderStep(AIM_BIND) end) end })
-
-        -- ===== Triggerbot ===================================================
-        local trig = { since = nil, lastShot = -1 }
-        local trigParams = RaycastParams.new()
-        trigParams.FilterType = Enum.RaycastFilterType.Exclude
-        trigParams.IgnoreWater = true
-        local function headUnderCrosshair()
-            local cam = workspace.CurrentCamera
-            if not cam then return false end
-            local m = mouseAt()
-            -- 1) the ray through your crosshair hits an enemy head
-            trigParams.FilterDescendantsInstances = { cam, myChar() }
-            local ray = cam:ViewportPointToRay(m.X, m.Y)
-            local hit = workspace:Raycast(ray.Origin, ray.Direction * 1000, trigParams)
-            if hit and hit.Instance and hit.Instance.Name == 'Head' then
-                local model = hit.Instance:FindFirstAncestorOfClass('Model')
-                local p = model and Players:GetPlayerFromCharacter(model)
-                if p and isFoe(p) and aliveHum(model) then return true end
-            end
-            -- 2) or a visible enemy head is drawn right under the crosshair
-            for _, p in ipairs(Players:GetPlayers()) do
-                if isFoe(p) then
-                    local char = charOf(p)
-                    local head = char and aliveHum(char) and char:FindFirstChild('Head')
-                    if head then
-                        local sp, vis = cam:WorldToViewportPoint(head.Position)
-                        if vis and sp.Z > 0 then
-                            local top = cam:WorldToViewportPoint(head.Position + Vector3.new(0, head.Size.Y * 0.5, 0))
-                            local r = math.max(math.abs(top.Y - sp.Y) * 1.2, 8)
-                            if (Vector2.new(sp.X, sp.Y) - m).Magnitude <= r and canSee(head.Position, char) then return true end
-                        end
-                    end
-                end
-            end
-            return false
-        end
-        local function click()
-            if mouse1click then
-                pcall(mouse1click)
-            else
-                local m = mouseAt()
-                pcall(function()
-                    VIM:SendMouseButtonEvent(m.X, m.Y, 0, true, game, 0)
-                    task.delay(0.02, function() VIM:SendMouseButtonEvent(m.X, m.Y, 0, false, game, 0) end)
-                end)
-            end
-        end
-        htrack(RunService.RenderStepped:Connect(function()
-            if not on('RVTrigger') or menuBusy() or UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
-                trig.since = nil
-                return
-            end
-            local now = os.clock()
-            if not headUnderCrosshair() then trig.since = nil; return end
-            trig.since = trig.since or now
-            local delay = opt('RVTrigDelay', 100) / 1000
-            if now - trig.since >= delay and now - trig.lastShot >= math.max(delay, 0.06) then
-                trig.lastShot = now
-                click()
-            end
-        end))
-
-        -- ===== Hitbox expander (exact restore of every head it touched) ====
-        local heads = setmetatable({}, { __mode = 'k' }) -- [head] = original props
-        local HEAD_RED = Color3.fromRGB(255, 50, 50)
-        local function saveHead(head)
-            if heads[head] then return heads[head] end
-            local o = { Size = head.Size, Transparency = head.Transparency, Material = head.Material, Color = head.Color,
-                CanCollide = head.CanCollide, decals = {} }
-            for _, ch in ipairs(head:GetChildren()) do
-                if ch:IsA('Decal') or ch:IsA('Texture') then o.decals[ch] = ch.Transparency end
-            end
-            heads[head] = o
-            return o
-        end
-        local function restoreHead(head)
-            local o = heads[head]
-            if not o then return end
-            pcall(function()
-                head.Size, head.Transparency, head.Material, head.Color = o.Size, o.Transparency, o.Material, o.Color
-                head.CanCollide = o.CanCollide
-                for d, tr in pairs(o.decals) do if d.Parent then d.Transparency = tr end end
-            end)
-            heads[head] = nil
-        end
-        local function restoreHeads()
-            for head in pairs(heads) do restoreHead(head) end
-        end
-        htrack(RunService.Heartbeat:Connect(function()
-            if not on('RVHitbox') then return end
-            local s = opt('RVHitboxSize', 5)
-            local size = Vector3.new(s, s, s)
-            local invis = on('RVHitboxInvis')
-            for _, p in ipairs(Players:GetPlayers()) do
-                local char = p ~= LocalPlayer and charOf(p)
-                local head = char and char:FindFirstChild('Head')
-                if head and head:IsA('BasePart') then
-                    if not (isFoe(p) and aliveHum(char)) then
-                        restoreHead(head) -- a teammate (or dead): back to normal
-                    else
-                        local o = saveHead(head)
-                        if head.Size ~= size then head.Size = size end
-                        if head.CanCollide then head.CanCollide = false end
-                        local tr = invis and 1 or 0.65
-                        if head.Transparency ~= tr then head.Transparency = tr end
-                        local mat = invis and o.Material or Enum.Material.ForceField
-                        if head.Material ~= mat then head.Material = mat end
-                        local col = invis and o.Color or HEAD_RED
-                        if head.Color ~= col then head.Color = col end
-                        for d, orig in pairs(o.decals) do
-                            local want = invis and 1 or orig
-                            if d.Parent and d.Transparency ~= want then d.Transparency = want end
-                        end
-                    end
-                end
-            end
-        end))
-        if Toggles.RVHitbox then Toggles.RVHitbox:OnChanged(function()
-            if not Toggles.RVHitbox.Value then restoreHeads() end
-        end) end
-        htrack({ Disconnect = restoreHeads })
-
-        -- ===== Client visuals: body + gun chams (restored when turned off) =
+        -- ===== Client visuals: body + gun chams (restored when off) =========
+        -- Body = your own character parts. Gun = the weapon in your first-person
+        -- viewmodel (workspace.ViewModels.FirstPerson.<name> -> ItemVisual),
+        -- never the arms. Only you ever see either.
         local chammed = setmetatable({}, { __mode = 'k' }) -- [part] = { Material, Color, kind }
         local function cham(part, kind, mat, color)
             if not chammed[part] then chammed[part] = { Material = part.Material, Color = part.Color, kind = kind } end
@@ -9520,9 +9150,15 @@ if HUB_CURRENT ~= 'roguecopy' then
             end
         end
         local function matOf(id) local ok, m = pcall(function() return Enum.Material[opt(id, 'ForceField')] end); return ok and m or Enum.Material.ForceField end
-        local function isLimb(name)
-            name = name:lower()
-            return name:find('arm') or name:find('hand') or name:find('glove') or name:find('sleeve') or name:find('finger')
+        local function myViewmodel()
+            local vms = workspace:FindFirstChild('ViewModels')
+            local fp = vms and vms:FindFirstChild('FirstPerson')
+            if not fp then return nil end
+            -- the viewmodel is named "<Player> - <Item> - <Skin>"
+            for _, m in ipairs(fp:GetChildren()) do
+                if m:IsA('Model') and m.Name:sub(1, #LocalPlayer.Name) == LocalPlayer.Name then return m end
+            end
+            return fp:FindFirstChildOfClass('Model')
         end
         local chamAcc = 0
         htrack(RunService.Heartbeat:Connect(function(dt)
@@ -9532,26 +9168,17 @@ if HUB_CURRENT ~= 'roguecopy' then
             local char = myChar()
             if on('RVSelfChams') and char then
                 local mat, color = matOf('RVSelfChamsMat'), opt('RVSelfChamsColor', Color3.fromRGB(133, 87, 242))
-                for _, part in ipairs(char:GetChildren()) do
+                for _, part in ipairs(char:GetDescendants()) do
                     if part:IsA('BasePart') and part.Name ~= 'HumanoidRootPart' then cham(part, 'body', mat, color) end
                 end
             end
             if on('RVGunChams') then
-                local mat, color = matOf('RVGunChamsMat'), opt('RVGunChamsColor', Color3.fromRGB(255, 0, 0))
-                local tool = char and char:FindFirstChildOfClass('Tool')
-                if tool then
-                    for _, part in ipairs(tool:GetDescendants()) do
-                        if part:IsA('BasePart') then cham(part, 'gun', mat, color) end
-                    end
-                end
-                local cam = workspace.CurrentCamera
-                if cam then
-                    for _, model in ipairs(cam:GetChildren()) do
-                        if model:IsA('Model') or model:IsA('Tool') then
-                            for _, part in ipairs(model:GetDescendants()) do
-                                if part:IsA('BasePart') and part.Transparency < 1 and not isLimb(part.Name) then cham(part, 'gun', mat, color) end
-                            end
-                        end
+                local vm = myViewmodel()
+                local gun = vm and vm:FindFirstChild('ItemVisual')
+                if gun then
+                    local mat, color = matOf('RVGunChamsMat'), opt('RVGunChamsColor', Color3.fromRGB(255, 0, 0))
+                    for _, part in ipairs(gun:GetDescendants()) do
+                        if part:IsA('BasePart') and part.Transparency < 1 then cham(part, 'gun', mat, color) end
                     end
                 end
             end
@@ -9560,7 +9187,7 @@ if HUB_CURRENT ~= 'roguecopy' then
         if Toggles.RVGunChams then Toggles.RVGunChams:OnChanged(function() if not Toggles.RVGunChams.Value then unchamKind('gun') end end) end
         htrack({ Disconnect = function() unchamKind('body'); unchamKind('gun') end })
 
-        -- ===== World: map lighting (a ColorCorrection that only exists while on)
+        -- ===== World: a ColorCorrection that only exists while on ============
         local cc
         local function worldApply()
             if not on('RVWorld') then
@@ -9581,24 +9208,10 @@ if HUB_CURRENT ~= 'roguecopy' then
         if Toggles.RVWorld then Toggles.RVWorld:OnChanged(worldApply) end
         htrack({ Disconnect = function() if cc then pcall(function() cc:Destroy() end); cc = nil end end })
 
-        -- ===== Movement =====================================================
-        -- Spinbot turns AutoRotate off while it spins (otherwise the character keeps
-        -- snapping back to face the camera) and puts it back after.
-        local spinHum, spinAuto
-        local function spinRestore()
-            if spinHum then pcall(function() spinHum.AutoRotate = spinAuto end) end
-            spinHum, spinAuto = nil, nil
-        end
+        -- ===== Movement: fly + noclip =======================================
         htrack(RunService.Heartbeat:Connect(function(dt)
             local root, hum = myRoot(), myHum()
             if not (root and hum) then return end
-            if on('RVSpin') then
-                if spinHum ~= hum then spinRestore(); spinHum, spinAuto = hum, hum.AutoRotate end
-                if hum.AutoRotate then hum.AutoRotate = false end
-                root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(opt('RVSpinSpeed', 10) * 60 * dt), 0)
-            elseif spinHum then
-                spinRestore()
-            end
             if on('RVFly') then
                 local cam = workspace.CurrentCamera
                 local cf, dir = cam and cam.CFrame or root.CFrame, Vector3.zero
@@ -9612,35 +9225,32 @@ if HUB_CURRENT ~= 'roguecopy' then
                 end
                 pcall(function() hum:ChangeState(Enum.HumanoidStateType.Swimming) end) -- no gravity pull while flying
                 root.AssemblyLinearVelocity = (dir.Magnitude > 0 and dir.Unit or Vector3.zero) * opt('RVFlySpeed', 30)
-            elseif on('RVSpeed') then
-                local md = hum.MoveDirection
-                local extra = (opt('RVSpeedMult', 2) - 1) * hum.WalkSpeed * dt
-                if md.Magnitude > 0 and extra > 0 then root.CFrame = root.CFrame + md.Unit * extra end
             end
         end))
-        if Toggles.RVFly then Toggles.RVFly:OnChanged(function()
-            if not Toggles.RVFly.Value then
-                local hum = myHum()
-                if hum and hum:GetState() == Enum.HumanoidStateType.Swimming then pcall(function() hum:ChangeState(Enum.HumanoidStateType.Freefall) end) end
-            end
-        end) end
-
-        htrack({ Disconnect = spinRestore })
-
         local noclipped = setmetatable({}, { __mode = 'k' })
         local function unclip()
             for p in pairs(noclipped) do pcall(function() if p.Parent then p.CanCollide = true end end) end
             table.clear(noclipped)
         end
         htrack(RunService.Stepped:Connect(function()
-            if not on('RVNoclip') then return end
+            if not (on('RVNoclip') or on('RVFly')) then return end
             local char = myChar()
             if not char then return end
             for _, p in ipairs(char:GetDescendants()) do
                 if p:IsA('BasePart') and p.CanCollide then p.CanCollide = false; noclipped[p] = true end
             end
         end))
-        if Toggles.RVNoclip then Toggles.RVNoclip:OnChanged(function() if not Toggles.RVNoclip.Value then unclip() end end) end
+        -- One OnChanged per toggle: this library's OnChanged REPLACES the handler,
+        -- so Fly's noclip-stop and swim-state restore must live together.
+        local function clipCheck() if not (on('RVNoclip') or on('RVFly')) then unclip() end end
+        if Toggles.RVNoclip then Toggles.RVNoclip:OnChanged(clipCheck) end
+        if Toggles.RVFly then Toggles.RVFly:OnChanged(function()
+            clipCheck()
+            if not Toggles.RVFly.Value then
+                local hum = myHum()
+                if hum and hum:GetState() == Enum.HumanoidStateType.Swimming then pcall(function() hum:ChangeState(Enum.HumanoidStateType.Freefall) end) end
+            end
+        end) end
         htrack(LocalPlayer.CharacterAdded:Connect(function() table.clear(noclipped) end))
         htrack({ Disconnect = unclip })
 
@@ -9667,7 +9277,7 @@ if HUB_CURRENT ~= 'roguecopy' then
             htrack({ Disconnect = function() alive = false; pcall(function() Library:SetWatermarkVisibility(false) end) end })
         end
 
-        -- ===== Drawings: ESP, FOV circles, bullet tracers ==================
+        -- ===== ESP (highlights + Drawing overlays) ==========================
         local hlFolder = Instance.new('Folder')
         hlFolder.Name = ''
         do
@@ -9686,7 +9296,7 @@ if HUB_CURRENT ~= 'roguecopy' then
         end })
 
         if not Drawing then
-            EspBox:AddLabel('Your executor has no Drawing API: boxes, names, tracers, skeletons, FOV circles and bullet tracers are unavailable. Highlight still works.', true)
+            EspBox:AddLabel('Your executor has no Drawing API: boxes, names, distance, health, tracers and skeletons are unavailable. Highlight still works.', true)
         end
         local mk = Drawing and function(class, props)
             local d = Drawing.new(class)
@@ -9703,12 +9313,12 @@ if HUB_CURRENT ~= 'roguecopy' then
         local function newEsp()
             local o = { box = mk('Square', { Thickness = 1, Filled = false }), boxOut = mk('Square', { Thickness = 3, Filled = false, Color = Color3.new(0, 0, 0) }),
                 name = mk('Text', { Size = 13, Center = true, Outline = true }), dist = mk('Text', { Size = 12, Center = true, Outline = true, Color = Color3.new(1, 1, 1) }),
-                tracer = mk('Line', { Thickness = 1 }), bones = {} }
+                hp = mk('Text', { Size = 12, Center = true, Outline = true }), tracer = mk('Line', { Thickness = 1 }), bones = {} }
             for i = 1, 10 do o.bones[i] = mk('Line', { Thickness = 1 }) end
             return o
         end
         local function hideEsp(o)
-            o.box.Visible, o.boxOut.Visible, o.name.Visible, o.dist.Visible, o.tracer.Visible = false, false, false, false, false
+            o.box.Visible, o.boxOut.Visible, o.name.Visible, o.dist.Visible, o.hp.Visible, o.tracer.Visible = false, false, false, false, false, false
             for _, b in ipairs(o.bones) do b.Visible = false end
         end
         local function removeEsp(o)
@@ -9717,10 +9327,6 @@ if HUB_CURRENT ~= 'roguecopy' then
                 else pcall(function() d:Remove() end) end
             end
         end
-        local aimCircle = Drawing and mk('Circle', { Color = Color3.fromRGB(255, 80, 100), Thickness = 1, NumSides = 64, Filled = false })
-        local silentCircle = Drawing and mk('Circle', { Color = Color3.fromRGB(255, 255, 255), Thickness = 1, NumSides = 64, Filled = false, Transparency = 0.6 })
-        local tracerLines = {}
-        if Drawing then for i = 1, MAX_TRACERS do tracerLines[i] = mk('Line', { Thickness = 2 }) end end
 
         htrack(Players.PlayerRemoving:Connect(function(p)
             dropHighlight(p)
@@ -9731,11 +9337,13 @@ if HUB_CURRENT ~= 'roguecopy' then
             local cam = workspace.CurrentCamera
             if not cam then return end
             local color = opt('RVEspColor', Color3.fromRGB(137, 207, 240))
+            local maxD = opt('RVEspMaxDist', 1500)
+            local myPos = (myRoot() and myRoot().Position) or cam.CFrame.Position
 
             -- Highlight (works without Drawing)
             local wantHl = on('RVEspHighlight')
             for _, p in ipairs(Players:GetPlayers()) do
-                local char = wantHl and isFoe(p) and charOf(p)
+                local char = wantHl and p ~= LocalPlayer and charOf(p)
                 if char and aliveHum(char) then
                     local h = highlights[p]
                     if not h or not h.Parent then
@@ -9756,29 +9364,22 @@ if HUB_CURRENT ~= 'roguecopy' then
 
             if not Drawing then return end
             local vp = cam.ViewportSize
-            local m = mouseAt()
-
-            -- FOV circles
-            aimCircle.Visible = on('RVAimbot')
-            aimCircle.Position, aimCircle.Radius = m, opt('RVAimFov', 120)
-            silentCircle.Visible = on('RVSilent') and on('RVSilentCircle')
-            silentCircle.Position, silentCircle.Radius = Vector2.new(vp.X / 2, vp.Y / 2), opt('RVSilentFov', 150)
-
-            -- ESP
             local wantBox, wantName, wantDist = on('RVEspBoxes'), on('RVEspNames'), on('RVEspDistance')
-            local wantTracer, wantBones = on('RVEspTracers'), on('RVEspSkeleton')
-            local any = wantBox or wantName or wantDist or wantTracer or wantBones
+            local wantHealth, wantTracer, wantBones = on('RVEspHealth'), on('RVEspTracers'), on('RVEspSkeleton')
+            local any = wantBox or wantName or wantDist or wantHealth or wantTracer or wantBones
             local seen = {}
             if any then
                 for _, p in ipairs(Players:GetPlayers()) do
-                    local char = isFoe(p) and charOf(p)
-                    local root = char and aliveHum(char) and (char:FindFirstChild('HumanoidRootPart') or char.PrimaryPart)
+                    local char = p ~= LocalPlayer and charOf(p)
+                    local hum = char and aliveHum(char)
+                    local root = hum and (char:FindFirstChild('HumanoidRootPart') or char.PrimaryPart)
                     if root then
+                        local dist = (root.Position - myPos).Magnitude
                         seen[p] = true
                         local o = esp[p]
                         if not o then o = newEsp(); esp[p] = o end
                         local sp = cam:WorldToViewportPoint(root.Position)
-                        if sp.Z <= 0 then hideEsp(o) else
+                        if sp.Z <= 0 or dist > maxD then hideEsp(o) else
                             local cf, size = char:GetBoundingBox()
                             local top = cam:WorldToViewportPoint((cf * CFrame.new(0, size.Y / 2, 0)).Position)
                             local bot = cam:WorldToViewportPoint((cf * CFrame.new(0, -size.Y / 2, 0)).Position)
@@ -9799,8 +9400,15 @@ if HUB_CURRENT ~= 'roguecopy' then
                             end
                             o.dist.Visible = wantDist
                             if wantDist then
-                                o.dist.Text = ('%dm'):format(math.floor((root.Position - cam.CFrame.Position).Magnitude * 0.28))
+                                o.dist.Text = ('%dm'):format(math.floor(dist * 0.28))
                                 o.dist.Position = Vector2.new(sp.X, y + h + 2)
+                            end
+                            o.hp.Visible = wantHealth
+                            if wantHealth then
+                                local frac = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                                o.hp.Text = ('%d'):format(math.floor(hum.Health + 0.5))
+                                o.hp.Color = Color3.fromRGB(0, 255, 0):Lerp(Color3.fromRGB(255, 0, 0), 1 - frac)
+                                o.hp.Position = Vector2.new(sp.X, y + h + (wantDist and 16 or 2))
                             end
                             o.tracer.Visible = wantTracer
                             if wantTracer then
@@ -9834,40 +9442,9 @@ if HUB_CURRENT ~= 'roguecopy' then
                     if p.Parent then hideEsp(o) else removeEsp(o); esp[p] = nil end
                 end
             end
-
-            -- Bullet tracers: start a little right of / below the camera (where the gun
-            -- is drawn in first person), fade out over a second
-            local now = os.clock()
-            local tcolor = opt('RVTracerColor', Color3.fromRGB(255, 0, 0))
-            local i = 0
-            for k = #tracers, 1, -1 do
-                local t = tracers[k]
-                local age = now - t.born
-                if age > 1 then table.remove(tracers, k) end
-            end
-            local cf = cam.CFrame
-            for _, t in ipairs(tracers) do
-                local from = t.from
-                if (from - cf.Position).Magnitude < 3 then
-                    from = from + cf.RightVector * 0.8 - cf.UpVector * 0.6 + cf.LookVector * 1.5
-                end
-                local a, b = cam:WorldToViewportPoint(from), cam:WorldToViewportPoint(t.to)
-                if a.Z > 0 and b.Z > 0 and i < MAX_TRACERS then
-                    i = i + 1
-                    local ln = tracerLines[i]
-                    ln.From, ln.To = Vector2.new(a.X, a.Y), Vector2.new(b.X, b.Y)
-                    ln.Color = tcolor
-                    ln.Transparency = 1 - (now - t.born)
-                    ln.Visible = true
-                end
-            end
-            for k = i + 1, MAX_TRACERS do tracerLines[k].Visible = false end
         end))
         htrack({ Disconnect = function()
             for p, o in pairs(esp) do removeEsp(o); esp[p] = nil end
-            if aimCircle then pcall(function() aimCircle:Remove() end) end
-            if silentCircle then pcall(function() silentCircle:Remove() end) end
-            for _, ln in ipairs(tracerLines) do pcall(function() ln:Remove() end) end
         end })
     else
         -- ===== UNIVERSAL HUB: any experience NOT registered above ========
